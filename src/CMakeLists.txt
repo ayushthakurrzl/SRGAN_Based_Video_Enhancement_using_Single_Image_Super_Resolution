@@ -2,7 +2,7 @@ cmake_policy(SET CMP0091 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(realsr-ncnn-vulkan)
+project(srmd-ncnn-vulkan)
 
 cmake_minimum_required(VERSION 3.9)
 
@@ -18,7 +18,7 @@ find_package(Threads)
 find_package(OpenMP)
 find_package(Vulkan REQUIRED)
 
-macro(realsr_add_shader SHADER_SRC)
+macro(srmd_add_shader SHADER_SRC)
     get_filename_component(SHADER_SRC_NAME_WE ${SHADER_SRC} NAME_WE)
     set(SHADER_COMP_HEADER ${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SRC_NAME_WE}.comp.hex.h)
 
@@ -112,12 +112,12 @@ if(NOT USE_SYSTEM_NCNN)
     option(WITH_LAYER_batchnorm "" OFF)
     option(WITH_LAYER_bias "" OFF)
     option(WITH_LAYER_bnll "" OFF)
-    option(WITH_LAYER_concat "" ON)
+    option(WITH_LAYER_concat "" OFF)
     option(WITH_LAYER_convolution "" ON)
     option(WITH_LAYER_crop "" ON)
     option(WITH_LAYER_deconvolution "" OFF)
     option(WITH_LAYER_dropout "" OFF)
-    option(WITH_LAYER_eltwise "" ON)
+    option(WITH_LAYER_eltwise "" OFF)
     option(WITH_LAYER_elu "" OFF)
     option(WITH_LAYER_embed "" OFF)
     option(WITH_LAYER_exp "" OFF)
@@ -140,14 +140,14 @@ if(NOT USE_SYSTEM_NCNN)
     option(WITH_LAYER_sigmoid "" OFF)
     option(WITH_LAYER_slice "" OFF)
     option(WITH_LAYER_softmax "" OFF)
-    option(WITH_LAYER_split "" ON)
+    option(WITH_LAYER_split "" OFF)
     option(WITH_LAYER_spp "" OFF)
     option(WITH_LAYER_tanh "" OFF)
     option(WITH_LAYER_threshold "" OFF)
     option(WITH_LAYER_tile "" OFF)
     option(WITH_LAYER_rnn "" OFF)
     option(WITH_LAYER_lstm "" OFF)
-    option(WITH_LAYER_binaryop "" ON)
+    option(WITH_LAYER_binaryop "" OFF)
     option(WITH_LAYER_unaryop "" OFF)
     option(WITH_LAYER_convolutiondepthwise "" OFF)
     option(WITH_LAYER_padding "" ON)
@@ -242,18 +242,18 @@ endif()
 # look for vulkan compute shader and compile
 set(SHADER_SPV_HEX_FILES)
 
-realsr_add_shader(realsr_preproc.comp)
-realsr_add_shader(realsr_postproc.comp)
-realsr_add_shader(realsr_preproc_tta.comp)
-realsr_add_shader(realsr_postproc_tta.comp)
+srmd_add_shader(srmd_preproc.comp)
+srmd_add_shader(srmd_postproc.comp)
+srmd_add_shader(srmd_preproc_tta.comp)
+srmd_add_shader(srmd_postproc_tta.comp)
 
 add_custom_target(generate-spirv DEPENDS ${SHADER_SPV_HEX_FILES})
 
-add_executable(realsr-ncnn-vulkan main.cpp realsr.cpp)
+add_executable(srmd-ncnn-vulkan main.cpp srmd.cpp)
 
-add_dependencies(realsr-ncnn-vulkan generate-spirv)
+add_dependencies(srmd-ncnn-vulkan generate-spirv)
 
-set(REALSR_LINK_LIBRARIES ncnn webp ${Vulkan_LIBRARY})
+set(SRMD_LINK_LIBRARIES ncnn webp ${Vulkan_LIBRARY})
 
 if(USE_STATIC_MOLTENVK)
     find_library(CoreFoundation NAMES CoreFoundation)
@@ -265,7 +265,7 @@ if(USE_STATIC_MOLTENVK)
     find_library(IOKit NAMES IOKit)
     find_library(IOSurface NAMES IOSurface)
 
-    list(APPEND REALSR_LINK_LIBRARIES
+    list(APPEND SRMD_LINK_LIBRARIES
         ${Metal}
         ${QuartzCore}
         ${CoreGraphics}
@@ -278,7 +278,7 @@ if(USE_STATIC_MOLTENVK)
 endif()
 
 if(OPENMP_FOUND)
-    list(APPEND REALSR_LINK_LIBRARIES ${OpenMP_CXX_LIBRARIES})
+    list(APPEND SRMD_LINK_LIBRARIES ${OpenMP_CXX_LIBRARIES})
 endif()
 
-target_link_libraries(realsr-ncnn-vulkan ${REALSR_LINK_LIBRARIES})
+target_link_libraries(srmd-ncnn-vulkan ${SRMD_LINK_LIBRARIES})

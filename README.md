@@ -1,109 +1,65 @@
-# RealSR ncnn Vulkan
+# SRMD ncnn Vulkan
 
-![CI](https://github.com/nihui/realsr-ncnn-vulkan/workflows/CI/badge.svg)
-![download](https://img.shields.io/github/downloads/nihui/realsr-ncnn-vulkan/total.svg)
+![CI](https://github.com/nihui/srmd-ncnn-vulkan/workflows/CI/badge.svg)
+![download](https://img.shields.io/github/downloads/nihui/srmd-ncnn-vulkan/total.svg)
 
-ncnn implementation of Real-World Super-Resolution via Kernel Estimation and Noise Injection super resolution.
+ncnn implementation of SRMD super resolution.
 
-realsr-ncnn-vulkan uses [ncnn project](https://github.com/Tencent/ncnn) as the universal neural network inference framework.
+srmd-ncnn-vulkan uses [ncnn project](https://github.com/Tencent/ncnn) as the universal neural network inference framework.
 
-## [Download](https://github.com/nihui/realsr-ncnn-vulkan/releases)
+## [Download](https://github.com/nihui/srmd-ncnn-vulkan/releases)
 
 Download Windows/Linux/MacOS Executable for Intel/AMD/Nvidia GPU
 
-**https://github.com/nihui/realsr-ncnn-vulkan/releases**
+**https://github.com/nihui/srmd-ncnn-vulkan/releases**
 
 This package includes all the binaries and models required. It is portable, so no CUDA or Caffe runtime environment is needed :)
-
-## About RealSR
-
-Real-World Super-Resolution via Kernel Estimation and Noise Injection (CVPRW 2020)
-
-https://github.com/jixiaozhong/RealSR
-
-Xiaozhong Ji, Yun Cao, Ying Tai, Chengjie Wang, Jilin Li, and Feiyue Huang
-
-*Tencent YouTu Lab*
-
-Our solution is the **winner of CVPR NTIRE 2020 Challenge on Real-World Super-Resolution** in both tracks.
-
-https://arxiv.org/abs/2005.01996
 
 ## Usages
 
 ### Example Command
 
 ```shell
-realsr-ncnn-vulkan.exe -i input.jpg -o output.png -s 4
+srmd-ncnn-vulkan.exe -i input.jpg -o output.png -n 3 -s 2
 ```
 
 ### Full Usages
 
 ```console
-Usage: realsr-ncnn-vulkan -i infile -o outfile [options]...
+Usage: srmd-ncnn-vulkan -i infile -o outfile [options]...
 
   -h                   show this help
   -v                   verbose output
   -i input-path        input image path (jpg/png/webp) or directory
   -o output-path       output image path (jpg/png/webp) or directory
-  -s scale             upscale ratio (4, default=4)
+  -n noise-level       denoise level (-1/0/1/2/3/4/5/6/7/8/9/10, default=3)
+  -s scale             upscale ratio (2/3/4, default=2)
   -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu
-  -m model-path        realsr model path (default=models-DF2K_JPEG)
-  -g gpu-id            gpu device to use (-1=cpu, default=0) can be 0,1,2 for multi-gpu
+  -m model-path        srmd model path (default=models-srmd)
+  -g gpu-id            gpu device to use (default=0) can be 0,1,2 for multi-gpu
   -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu
   -x                   enable tta mode
   -f format            output image format (jpg/png/webp, default=ext/png)
 ```
 
 - `input-path` and `output-path` accept either file path or directory path
-- `scale` = scale level, 4 = upscale 4x
+- `noise-level` = noise level, large value means strong denoise effect, -1 = no effect
+- `scale` = scale level, 2 = upscale 2x, 3 = upscale 3x, 4 = upscale 4x
 - `tile-size` = tile size, use smaller value to reduce GPU memory usage, default selects automatically
-- `load:proc:save` = thread count for the three stages (image decoding + realsr upscaling + image encoding), using larger values may increase GPU usage and consume more GPU memory. You can tune this configuration with "4:4:4" for many small-size images, and "2:2:2" for large-size images. The default setting usually works fine for most situations. If you find that your GPU is hungry, try increasing thread count to achieve faster processing.
+- `load:proc:save` = thread count for the three stages (image decoding + waifu2x upscaling + image encoding), using larger values may increase GPU usage and consume more GPU memory. You can tune this configuration with "4:4:4" for many small-size images, and "2:2:2" for large-size images. The default setting usually works fine for most situations. If you find that your GPU is hungry, try increasing thread count to achieve faster processing.
 - `format` = the format of the image to be output, png is better supported, however webp generally yields smaller file sizes, both are losslessly encoded
 
-If you encounter crash or error, try to upgrade your GPU driver
+If you encounter a crash or error, try upgrading your GPU driver:
 
 - Intel: https://downloadcenter.intel.com/product/80939/Graphics-Drivers
 - AMD: https://www.amd.com/en/support
 - NVIDIA: https://www.nvidia.com/Download/index.aspx
 
-## Build from Source
-
-1. Download and setup the Vulkan SDK from https://vulkan.lunarg.com/
-  - For Linux distributions, you can either get the essential build requirements from package manager
-```shell
-dnf install vulkan-headers vulkan-loader-devel
-```
-```shell
-apt-get install libvulkan-dev
-```
-```shell
-pacman -S vulkan-headers vulkan-icd-loader
-```
-
-2. Clone this project with all submodules
-
-```shell
-git clone https://github.com/nihui/realsr-ncnn-vulkan.git
-cd realsr-ncnn-vulkan
-git submodule update --init --recursive
-```
-
-3. Build with CMake
-  - You can pass -DUSE_STATIC_MOLTENVK=ON option to avoid linking the vulkan loader library on MacOS
-
-```shell
-mkdir build
-cd build
-cmake ../src
-cmake --build . -j 4
-```
-
 ## Sample Images
 
 ### Original Image
 
-![origin](images/0.png)
+![origin](images/0.jpg)
 
 ### Upscale 4x with ImageMagick Lanczo4 Filter
 
@@ -111,27 +67,29 @@ cmake --build . -j 4
 convert origin.jpg -resize 400% output.png
 ```
 
-![browser](images/im.png)
+![browser](images/1.png)
 
-### Upscale 4x with srmd scale=4 noise=-1
-
-```shell
-srmd-ncnn-vulkan.exe -i origin.jpg -o 4x.png -s 4 -n -1
-```
-
-![waifu2x](images/srmd.png)
-
-### Upscale 4x with realsr model=DF2K scale=4 tta=1
+### Upscale 4x with waifu2x scale=2 model=upconv_7_photo twice
 
 ```shell
-realsr-ncnn-vulkan.exe -i origin.jpg -o output.png -s 4 -x -m models-DF2K
+waifu2x-ncnn-vulkan.exe -i origin.jpg -o 2x.png -s 2 -m models-upconv_7_photo
+waifu2x-ncnn-vulkan.exe -i 2x.png -o 4x.png -s 2 -m models-upconv_7_photo
 ```
 
-![realsr](images/2.png)
+![waifu2x](images/w.png)
 
-## Original RealSR Project
+### Upscale 4x with srmd noise=3 scale=4
 
-- https://github.com/jixiaozhong/RealSR
+```shell
+srmd-ncnn-vulkan.exe -i origin.jpg -o output.png -n 3 -s 4
+```
+
+![srmd](images/2.png)
+
+## Original SRMD Project
+
+- https://github.com/cszn/SRMD
+- https://github.com/cszn/KAIR
 
 ## Other Open-Source Code Used
 

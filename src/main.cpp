@@ -1,4 +1,4 @@
-// realsr implemented with ncnn library
+// srmd implemented with ncnn library
 
 #include <stdio.h>
 #include <algorithm>
@@ -94,21 +94,22 @@ static std::vector<int> parse_optarg_int_array(const char* optarg)
 #include "gpu.h"
 #include "platform.h"
 
-#include "realsr.h"
+#include "srmd.h"
 
 #include "filesystem_utils.h"
 
 static void print_usage()
 {
-    fprintf(stderr, "Usage: realsr-ncnn-vulkan -i infile -o outfile [options]...\n\n");
+    fprintf(stderr, "Usage: srmd-ncnn-vulkan -i infile -o outfile [options]...\n\n");
     fprintf(stderr, "  -h                   show this help\n");
     fprintf(stderr, "  -v                   verbose output\n");
     fprintf(stderr, "  -i input-path        input image path (jpg/png/webp) or directory\n");
     fprintf(stderr, "  -o output-path       output image path (jpg/png/webp) or directory\n");
-    fprintf(stderr, "  -s scale             upscale ratio (4, default=4)\n");
+    fprintf(stderr, "  -n noise-level       denoise level (-1/0/1/2/3/4/5/6/7/8/9/10, default=3)\n");
+    fprintf(stderr, "  -s scale             upscale ratio (2/3/4, default=2)\n");
     fprintf(stderr, "  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu\n");
-    fprintf(stderr, "  -m model-path        realsr model path (default=models-DF2K_JPEG)\n");
-    fprintf(stderr, "  -g gpu-id            gpu device to use (-1=cpu, default=auto) can be 0,1,2 for multi-gpu\n");
+    fprintf(stderr, "  -m model-path        srmd model path (default=models-srmd)\n");
+    fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
     fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
     fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
@@ -269,6 +270,7 @@ void* load(void* args)
         {
             Task v;
             v.id = i;
+            v.webp = webp;
             v.inpath = imagepath;
             v.outpath = ltp->output_files[i];
 
@@ -305,13 +307,13 @@ void* load(void* args)
 class ProcThreadParams
 {
 public:
-    const RealSR* realsr;
+    const SRMD* srmd;
 };
 
 void* proc(void* args)
 {
     const ProcThreadParams* ptp = (const ProcThreadParams*)args;
-    const RealSR* realsr = ptp->realsr;
+    const SRMD* srmd = ptp->srmd;
 
     for (;;)
     {
@@ -322,7 +324,7 @@ void* proc(void* args)
         if (v.id == -233)
             break;
 
-        realsr->process(v.inimage, v.outimage);
+        srmd->process(v.inimage, v.outimage);
 
         tosave.put(v);
     }
@@ -424,9 +426,10 @@ int main(int argc, char** argv)
 {
     path_t inputpath;
     path_t outputpath;
-    int scale = 4;
+    int noise = 3;
+    int scale = 2;
     std::vector<int> tilesize;
-    path_t model = PATHSTR("models-DF2K_JPEG");
+    path_t model = PATHSTR("models-srmd");
     std::vector<int> gpuid;
     int jobs_load = 1;
     std::vector<int> jobs_proc;
@@ -438,7 +441,7 @@ int main(int argc, char** argv)
 #if _WIN32
     setlocale(LC_ALL, "");
     wchar_t opt;
-    while ((opt = getopt(argc, argv, L"i:o:s:t:m:g:j:f:vxh")) != (wchar_t)-1)
+    while ((opt = getopt(argc, argv, L"i:o:n:s:t:m:g:j:f:vxh")) != (wchar_t)-1)
     {
         switch (opt)
         {
@@ -447,6 +450,9 @@ int main(int argc, char** argv)
             break;
         case L'o':
             outputpath = optarg;
+            break;
+        case L'n':
+            noise = _wtoi(optarg);
             break;
         case L's':
             scale = _wtoi(optarg);
@@ -481,7 +487,7 @@ int main(int argc, char** argv)
     }
 #else // _WIN32
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:s:t:m:g:j:f:vxh")) != -1)
+    while ((opt = getopt(argc, argv, "i:o:n:s:t:m:g:j:f:vxh")) != -1)
     {
         switch (opt)
         {
@@ -490,6 +496,9 @@ int main(int argc, char** argv)
             break;
         case 'o':
             outputpath = optarg;
+            break;
+        case 'n':
+            noise = atoi(optarg);
             break;
         case 's':
             scale = atoi(optarg);
@@ -530,9 +539,9 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    if (scale != 4)
+    if (noise < -1 || noise > 10 || scale < 2 || scale > 4)
     {
-        fprintf(stderr, "invalid scale argument\n");
+        fprintf(stderr, "invalid noise or scale argument\n");
         return -1;
     }
 
@@ -660,10 +669,9 @@ int main(int argc, char** argv)
 
     int prepadding = 0;
 
-    if (model.find(PATHSTR("models-DF2K")) != path_t::npos
-        || model.find(PATHSTR("models-DF2K_JPEG")) != path_t::npos)
+    if (model.find(PATHSTR("models-srmd")) != path_t::npos)
     {
-        prepadding = 10;
+        prepadding = 12;
     }
     else
     {
@@ -674,18 +682,28 @@ int main(int argc, char** argv)
 #if _WIN32
     wchar_t parampath[256];
     wchar_t modelpath[256];
-    if (scale == 4)
+    if (noise == -1)
     {
-        swprintf(parampath, 256, L"%s/x4.param", model.c_str());
-        swprintf(modelpath, 256, L"%s/x4.bin", model.c_str());
+        swprintf(parampath, 256, L"%s/srmdnf_x%d.param", model.c_str(), scale);
+        swprintf(modelpath, 256, L"%s/srmdnf_x%d.bin", model.c_str(), scale);
+    }
+    else
+    {
+        swprintf(parampath, 256, L"%s/srmd_x%d.param", model.c_str(), scale);
+        swprintf(modelpath, 256, L"%s/srmd_x%d.bin", model.c_str(), scale);
     }
 #else
     char parampath[256];
     char modelpath[256];
-    if (scale == 4)
+    if (noise == -1)
     {
-        sprintf(parampath, "%s/x4.param", model.c_str());
-        sprintf(modelpath, "%s/x4.bin", model.c_str());
+        sprintf(parampath, "%s/srmdnf_x%d.param", model.c_str(), scale);
+        sprintf(modelpath, "%s/srmdnf_x%d.bin", model.c_str(), scale);
+    }
+    else
+    {
+        sprintf(parampath, "%s/srmd_x%d.param", model.c_str(), scale);
+        sprintf(modelpath, "%s/srmd_x%d.bin", model.c_str(), scale);
     }
 #endif
 
@@ -722,7 +740,7 @@ int main(int argc, char** argv)
     int gpu_count = ncnn::get_gpu_count();
     for (int i=0; i<use_gpu_count; i++)
     {
-        if (gpuid[i] < -1 || gpuid[i] >= gpu_count)
+        if (gpuid[i] < 0 || gpuid[i] >= gpu_count)
         {
             fprintf(stderr, "invalid gpu device\n");
 
@@ -734,15 +752,9 @@ int main(int argc, char** argv)
     int total_jobs_proc = 0;
     for (int i=0; i<use_gpu_count; i++)
     {
-        if (gpuid[i] == -1)
-        {
-            jobs_proc[i] = std::min(jobs_proc[i], cpu_count);
-            total_jobs_proc += 1;
-        }
-        else
-        {
-            total_jobs_proc += jobs_proc[i];
-        }
+        int gpu_queue_count = ncnn::get_gpu_info(gpuid[i]).compute_queue_count();
+        jobs_proc[i] = std::min(jobs_proc[i], gpu_queue_count);
+        total_jobs_proc += jobs_proc[i];
     }
 
     for (int i=0; i<use_gpu_count; i++)
@@ -750,44 +762,35 @@ int main(int argc, char** argv)
         if (tilesize[i] != 0)
             continue;
 
-        if (gpuid[i] == -1)
-        {
-            // cpu only
-            tilesize[i] = 200;
-            continue;
-        }
-
         uint32_t heap_budget = ncnn::get_gpu_device(gpuid[i])->get_heap_budget();
 
         // more fine-grained tilesize policy here
-        if (model.find(PATHSTR("models-DF2K")) != path_t::npos
-            || model.find(PATHSTR("models-DF2K_JPEG")) != path_t::npos)
+        if (model.find(PATHSTR("models-srmd")) != path_t::npos)
         {
-            if (heap_budget > 1900)
+            if (heap_budget > 2600)
+                tilesize[i] = 400;
+            else if (heap_budget > 740)
                 tilesize[i] = 200;
-            else if (heap_budget > 550)
+            else if (heap_budget > 250)
                 tilesize[i] = 100;
-            else if (heap_budget > 190)
-                tilesize[i] = 64;
             else
                 tilesize[i] = 32;
         }
     }
 
     {
-        std::vector<RealSR*> realsr(use_gpu_count);
+        std::vector<SRMD*> srmd(use_gpu_count);
 
         for (int i=0; i<use_gpu_count; i++)
         {
-            int num_threads = gpuid[i] == -1 ? jobs_proc[i] : 1;
+            srmd[i] = new SRMD(gpuid[i], tta_mode);
 
-            realsr[i] = new RealSR(gpuid[i], tta_mode, num_threads);
+            srmd[i]->load(paramfullpath, modelfullpath);
 
-            realsr[i]->load(paramfullpath, modelfullpath);
-
-            realsr[i]->scale = scale;
-            realsr[i]->tilesize = tilesize[i];
-            realsr[i]->prepadding = prepadding;
+            srmd[i]->noise = noise;
+            srmd[i]->scale = scale;
+            srmd[i]->tilesize = tilesize[i];
+            srmd[i]->prepadding = prepadding;
         }
 
         // main routine
@@ -801,11 +804,11 @@ int main(int argc, char** argv)
 
             ncnn::Thread load_thread(load, (void*)&ltp);
 
-            // realsr proc
+            // srmd proc
             std::vector<ProcThreadParams> ptp(use_gpu_count);
             for (int i=0; i<use_gpu_count; i++)
             {
-                ptp[i].realsr = realsr[i];
+                ptp[i].srmd = srmd[i];
             }
 
             std::vector<ncnn::Thread*> proc_threads(total_jobs_proc);
@@ -813,16 +816,9 @@ int main(int argc, char** argv)
                 int total_jobs_proc_id = 0;
                 for (int i=0; i<use_gpu_count; i++)
                 {
-                    if (gpuid[i] == -1)
+                    for (int j=0; j<jobs_proc[i]; j++)
                     {
                         proc_threads[total_jobs_proc_id++] = new ncnn::Thread(proc, (void*)&ptp[i]);
-                    }
-                    else
-                    {
-                        for (int j=0; j<jobs_proc[i]; j++)
-                        {
-                            proc_threads[total_jobs_proc_id++] = new ncnn::Thread(proc, (void*)&ptp[i]);
-                        }
                     }
                 }
             }
@@ -868,9 +864,9 @@ int main(int argc, char** argv)
 
         for (int i=0; i<use_gpu_count; i++)
         {
-            delete realsr[i];
+            delete srmd[i];
         }
-        realsr.clear();
+        srmd.clear();
     }
 
     ncnn::destroy_gpu_instance();
