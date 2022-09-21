@@ -1,76 +1,160 @@
-[![Discord](https://img.shields.io/badge/Discord-Join-blue.svg)](https://discord.gg/jCAFvHM2WK) :: [![Downloads522](https://img.shields.io/github/downloads/DeadSix27/waifu2x-converter-cpp/latest/total.svg)](https://github.com/DeadSix27/waifu2x-converter-cpp/releases) :: [![TotalDownloads](https://img.shields.io/github/downloads/DeadSix27/waifu2x-converter-cpp/total.svg)](https://github.com/DeadSix27/waifu2x-converter-cpp/releases)
+# SRGAN Based Video-Enhancement-using-Single-Image-Super-Resolution
 
-# ---------- Work stalled for now ----------
-### @YukihoAA has push rights in case anything important comes up, if he finds the time that is.
----
+In this project, we have used a pretrained Super-Resolution Generative Adversarial Networks(SRGAN) model to perform Video enhancement using Single Image Super Resolution. The model takes a low resolution video as input and provides a high resolution video as output. The model has been validated in different genres videos at different quality levels. It is done in 6 simple steps which includes conversion of input video into low resolution frames and then converting back the processed high resolution frames into the output video.
+## STEP-1
+Clone the following repository which consists of Pretrained SRGAN Model in your Notebook:-
 
-### waifu2x (converter only version)
+``` !git clone https://github.com/krasserm/super-resolution ```
 
-This is a reimplementation of waifu2x ([original](https://github.com/nagadomi/waifu2x)) converter function, in C++, using OpenCV.
-This is also a reimplementation of [waifu2x python version](https://marcan.st/transf/waifu2x.py) by [Hector Martin](https://marcan.st/blog/).
-You can use this as command-line tool of image noise reduction or/and scaling.
+## STEP-2
+Create a directory named Super Resolution by using the command given below :-
 
-This software was originally made by @WL-Amigo and has been improved a lot over the years, see [FORK_CHANGES.md](FORK_CHANGES.md) for more info on that.
+```cd /content/super-resolution```
 
-## Obtain it here:
+## STEP-3
+The pretrained weights required for running the model can be  downloaded from the link given below:-
 
-- #### Windows downloads
-  - https://github.com/DeadSix27/waifu2x-converter-cpp/releases
-  - Officially supported GUI:
-	  - https://github.com/YukihoAA/waifu2x_snowshell/releases
+[weights-srgan.tar.gz](https://drive.google.com/file/d/1ZKpQvtxLKKq2fM1gKtl085pgHSgSQSBw/view?usp=sharing)
 
-- #### AUR (Arch)
-  - [waifu2x-converter-cpp-git](https://aur.archlinux.org/packages/waifu2x-converter-cpp-git/) (git master)
-  - [waifu2x-converter-cpp](https://aur.archlinux.org/packages/waifu2x-converter-cpp/) (releaes)
-  - These are maintained by [nfnty](https://aur.archlinux.org/account/nfnty). If you have issues with the AUR packages, please contact him.
+After downloading the pretrained weights, upload it in your notebook and then run the command below to extract the weights into the root folder-
+```!tar xvfz /content/weights-srgan.tar.gz```
+
+
+## STEP-4
+To perform video enhancement,the input video should be converted into frames and the model can be used to obtain super resolved frames.This can be done using python codes given below.
+
+```python
+# Importing all necessary libraries 
+import timei
+import cv2 
+import os
+import numpy as np
+from model import resolve_single
+from utils import load_image, plot_sample
+from model.srgan import generator
+
+# Read the video from specified path 
+cam = cv2.VideoCapture("/content/Drama144p_input.3gp") 
+fps = cam.get(cv2.CAP_PROP_FPS)
+print(fps)
+
+
+try:
+      
+    # creating a folder named data 
+    if not os.path.exists('data'): 
+        os.makedirs('data') 
   
-- #### Fedora
-  - [waifu2x-converter-cpp](https://apps.fedoraproject.org/packages/waifu2x-converter-cpp)
-  - This is maintained by [eclipseo](https://fedoraproject.org/wiki/User:Eclipseo). If you have issues with the Fedora package, please contact him.
+# if not created then raise error 
+except OSError:
+    print ('Error: Creating directory of data') 
+  
+#frames Extraction from video 
+currentframe = 0
+arr_img = []
+while(True): 
+      
+    # reading from frame 
+    ret,frame = cam.read() 
+  
+    if ret: 
+        # if video is still left continue creating images 
+        name = './data/frame' + str(currentframe).zfill(3) + '.jpg'
+        print ('Creating...' + name) 
+  
+        # writing the extracted images 
+        cv2.imwrite(name, frame) 
+  
+        # increasing counter so that it will show how many frames are created 
+        currentframe += 1
+        #storing the path of extracted frames in a list
+        arr_img.append(name)
+    else: 
+        break
+#print(arr_img)
 
-- #### NixOS
-  - [waifu2x-converter-cpp](https://search.nixos.org/packages?show=waifu2x-converter-cpp&query=waifu2x-converter-cpp)
-  - If you have issues with the NixOS package, please create an [issue](https://github.com/NixOS/nixpkgs/issues) on the [nixpkgs repo](https://github.com/NixOS/nixpkgs).
+start = timeit.default_timer()
+model = generator()
+model.load_weights('weights/srgan/gan_generator.h5')
 
-- ####  Other Linux
-	 - Please build from source. See [BUILDING.md](BUILDING.md) for help.
+#Initialization of an empty list to store the super resolved images
+arr_output=[]
+print(len(arr_img))
+n= len(arr_img)
 
-## Supported platforms
+#Implementation of SRGAN Model in extracted frames
+for i in range(n):
+  lr = load_image(arr_img[i])
+  sr = resolve_single(model, lr)
+  #plot_sample(lr, sr)
+  
+  arr_output.append(sr)
+stop = timeit.default_timer()
+#print(arr_output)
 
- - Linux
- - LInux (ARM)
- - Windows 7+  
- - MacOS?
-   - This is not officially supported but see here for more information: [#20](https://github.com/DeadSix27/waifu2x-converter-cpp/issues/20)
- 
-## Build dependencies
+print("time : ", stop-start)
 
- - [GCC 5](https://gcc.gnu.org/) (Linux)
- - [Visual Studio 2019](https://visualstudio.microsoft.com/downloads/) (Windows)
- - [picojson](https://github.com/kazuho/picojson) (included)
- - [TCLAP(Templatized C++ Command Line Parser Library)](http://tclap.sourceforge.net/) (included)
- - [OpenCV 3+](https://opencv.org/releases.html)
+# Release all space and windows once done 
+cam.release() 
+cv2.destroyAllWindows()
+```
 
-## How to build
+Here we have attatched a sample image that shows model implementation on an input frame-
 
-See [BUILDING.md](BUILDING.md) for more information.
+![Results](Results/Results.png)
 
-## How to Train Own Model
+# STEP-5
+Run the Python codes given below to save the super resolved frames obtained in a folder and to store their output path in a list-
 
-waifu2x-conveter only supports vgg models.
-See [nagadomi/waifu2x](https://github.com/nagadomi/waifu2x#train-your-own-model) for more information.
+```python
+#Importing necessary libraries
+from keras.preprocessing.image import load_img
+from keras.preprocessing.image import img_to_array
+from keras.preprocessing.image import array_to_img
+from keras.preprocessing.image import save_img
 
-## Usage
+#Making a directory for storing super resolved frames in image format
+os.makedirs("output_images")
 
-Usage of this program can be seen by executing `waifu2x-converter-cpp --help`
-If you are on Windows and prefer GUIs, see [here](#windows-downloads).
+#Initialization of an empty list to store the path of Super resolved frames
+s_res= []
+for j in range(len(arr_output)):
+  out_name = '/content/super-resolution/output_images/frame' + str(j).zfill(3) + '.jpg'
+  img_pil = array_to_img(arr_output[j])
+  img1 = save_img(out_name, img_pil)
+  s_res.append(out_name)
+  
+#print(s_res)
+```
 
-## Notes:
+# STEP-6
+Run the Python codes given  below to  convert  super resolved frames obtained into a Video-
 
-I'd appreciate any help on this project, I do not want yet another fork... so if you have improvement ideas or find bugs, please make a pull request or open an issue :)!
+```python
+import cv2
+import numpy as np
+for i in range(len(s_res)):
+    filename=s_res[i]
+    #reading each files
+    img = cv2.imread(filename)
+    height, width, layers = img.shape
+    size = (width,height)
 
-## A big thanks to these people helping me maintain this fork:
+fps = 20       #Put the fps value as your convenience or 
+               #Calculate by using (No. of frames)/Video_duration in seconds  
 
-- @YukihoAA
-- @iame6162013
-- And more: https://github.com/DeadSix27/waifu2x-converter-cpp/graphs/contributors
+#Creation of output video               
+out = cv2.VideoWriter('drama2_output.mp4',cv2.VideoWriter_fourcc(*'DIVX'), fps , size)
+
+#Writing Frames into video
+for i in range(len(s_res)):
+    out.write(cv2.imread(s_res[i]))
+out.release()
+```
+
+# Final Results - 
+Below link provides the results obtained for Video enhancement using single image super resolution using SRGAN Model. 
+
+[Video Results](https://drive.google.com/drive/folders/1NiyJCLsB_-pAmFJNF97QhZiho7zPLMCw?usp=sharing)
+
+
