@@ -1,160 +1,59 @@
-# SRGAN Based Video-Enhancement-using-Single-Image-Super-Resolution
 
-In this project, we have used a pretrained Super-Resolution Generative Adversarial Networks(SRGAN) model to perform Video enhancement using Single Image Super Resolution. The model takes a low resolution video as input and provides a high resolution video as output. The model has been validated in different genres videos at different quality levels. It is done in 6 simple steps which includes conversion of input video into low resolution frames and then converting back the processed high resolution frames into the output video.
-## STEP-1
-Clone the following repository which consists of Pretrained SRGAN Model in your Notebook:-
+# AI Video Super-Resolution
 
-``` !git clone https://github.com/krasserm/super-resolution ```
+Upscale video resolution quality with advanced AI algorithms
 
-## STEP-2
-Create a directory named Super Resolution by using the command given below :-
+The process of reconstructing high-resolution video from low-resolution video is called super-resolution reconstruction. Recent state-of-the-art super-resolution methods have achieved impressive performance on ideal datasets. However, these methods always fail in real-world video super-resolution, since most of them ignore the blurring and noise that exists in the real world (such as video compression). Together with scientists from the GluonCV team, we developed a deep learning based super-resolution approach named GDAVSR. This approach can bring better visual quality. Based on this method, we can help customers improve the resolution of videos at a low cost.
 
-```cd /content/super-resolution```
+![homepage](homepage.png)
 
-## STEP-3
-The pretrained weights required for running the model can be  downloaded from the link given below:-
+## Architecture diagram
+![architecture diagram](arch.png)
 
-[weights-srgan.tar.gz](https://drive.google.com/file/d/1ZKpQvtxLKKq2fM1gKtl085pgHSgSQSBw/view?usp=sharing)
+## Usage
 
-After downloading the pretrained weights, upload it in your notebook and then run the command below to extract the weights into the root folder-
-```!tar xvfz /content/weights-srgan.tar.gz```
+## CloudFormation(Recommend)
 
+Login to the AWS console and select the link below to launch the AWS cloudformation template.
 
-## STEP-4
-To perform video enhancement,the input video should be converted into frames and the model can be used to obtain super resolved frames.This can be done using python codes given below.
+- [Global](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/new?stackName=SuperResolution&templateURL=https://aws-gcr-solutions.s3.amazonaws.com/Aws-gcr-ai-super-resolution/latest/SuperResolutionStack.template)
+- [China](https://console.amazonaws.cn/cloudformation/home?region=cn-north-1#/stacks/new?stackName=SuperResolution&templateURL=https://aws-gcr-solutions.s3.cn-north-1.amazonaws.com.cn/Aws-gcr-ai-super-resolution/latest/SuperResolutionStack.template)
 
-```python
-# Importing all necessary libraries 
-import timei
-import cv2 
-import os
-import numpy as np
-from model import resolve_single
-from utils import load_image, plot_sample
-from model.srgan import generator
+### CDK
+- An AWS account
+- Python installed, such as 3.6
+- Install dependencies of app  
+- Build lambda layer 
 
-# Read the video from specified path 
-cam = cv2.VideoCapture("/content/Drama144p_input.3gp") 
-fps = cam.get(cv2.CAP_PROP_FPS)
-print(fps)
-
-
-try:
-      
-    # creating a folder named data 
-    if not os.path.exists('data'): 
-        os.makedirs('data') 
-  
-# if not created then raise error 
-except OSError:
-    print ('Error: Creating directory of data') 
-  
-#frames Extraction from video 
-currentframe = 0
-arr_img = []
-while(True): 
-      
-    # reading from frame 
-    ret,frame = cam.read() 
-  
-    if ret: 
-        # if video is still left continue creating images 
-        name = './data/frame' + str(currentframe).zfill(3) + '.jpg'
-        print ('Creating...' + name) 
-  
-        # writing the extracted images 
-        cv2.imwrite(name, frame) 
-  
-        # increasing counter so that it will show how many frames are created 
-        currentframe += 1
-        #storing the path of extracted frames in a list
-        arr_img.append(name)
-    else: 
-        break
-#print(arr_img)
-
-start = timeit.default_timer()
-model = generator()
-model.load_weights('weights/srgan/gan_generator.h5')
-
-#Initialization of an empty list to store the super resolved images
-arr_output=[]
-print(len(arr_img))
-n= len(arr_img)
-
-#Implementation of SRGAN Model in extracted frames
-for i in range(n):
-  lr = load_image(arr_img[i])
-  sr = resolve_single(model, lr)
-  #plot_sample(lr, sr)
-  
-  arr_output.append(sr)
-stop = timeit.default_timer()
-#print(arr_output)
-
-print("time : ", stop-start)
-
-# Release all space and windows once done 
-cam.release() 
-cv2.destroyAllWindows()
+```
+pip install -r requirements.txt
+cd layers
+chmod +x build_layer.sh
+./build_layer.sh
+cd ..
 ```
 
-Here we have attatched a sample image that shows model implementation on an input frame-
-
-![Results](Results/Results.png)
-
-# STEP-5
-Run the Python codes given below to save the super resolved frames obtained in a folder and to store their output path in a list-
-
-```python
-#Importing necessary libraries
-from keras.preprocessing.image import load_img
-from keras.preprocessing.image import img_to_array
-from keras.preprocessing.image import array_to_img
-from keras.preprocessing.image import save_img
-
-#Making a directory for storing super resolved frames in image format
-os.makedirs("output_images")
-
-#Initialization of an empty list to store the path of Super resolved frames
-s_res= []
-for j in range(len(arr_output)):
-  out_name = '/content/super-resolution/output_images/frame' + str(j).zfill(3) + '.jpg'
-  img_pil = array_to_img(arr_output[j])
-  img1 = save_img(out_name, img_pil)
-  s_res.append(out_name)
-  
-#print(s_res)
 ```
-
-# STEP-6
-Run the Python codes given  below to  convert  super resolved frames obtained into a Video-
-
-```python
-import cv2
-import numpy as np
-for i in range(len(s_res)):
-    filename=s_res[i]
-    #reading each files
-    img = cv2.imread(filename)
-    height, width, layers = img.shape
-    size = (width,height)
-
-fps = 20       #Put the fps value as your convenience or 
-               #Calculate by using (No. of frames)/Video_duration in seconds  
-
-#Creation of output video               
-out = cv2.VideoWriter('drama2_output.mp4',cv2.VideoWriter_fourcc(*'DIVX'), fps , size)
-
-#Writing Frames into video
-for i in range(len(s_res)):
-    out.write(cv2.imread(s_res[i]))
-out.release()
+cdk synth -c inferentia=true
+cdk deploy --parameters MaxvCpus=<max cpu>
 ```
-
-# Final Results - 
-Below link provides the results obtained for Video enhancement using single image super resolution using SRGAN Model. 
-
-[Video Results](https://drive.google.com/drive/folders/1NiyJCLsB_-pAmFJNF97QhZiho7zPLMCw?usp=sharing)
+MaxvCpus:default: 16
 
 
+### How to use
+1. Upload low-resolution video to S3 bucket('superresolutions*')
+1. call Lambda func SuperResolutionSplitVideo
+```
+{
+"key": "video_file",
+"scale": "4",
+"task": "inference"
+}
+```
+    - key: filename in s3 bucket
+    - scale['2', '4']: Scale for super resolution. Default: 2
+    - task[inference, debug]: When it is set to debug, the intermediate file will be uploaded to S3 for debugging. Default: inference
+    - env[onDemand, spot]: which the type of machine to be used. Default: spot
+
+1. Wait for Batch processing..
+1. Download high-resolution video from S3 bucket('superresolutions*')
