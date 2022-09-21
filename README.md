@@ -1,99 +1,76 @@
-# SRMD ncnn Vulkan
+[![Discord](https://img.shields.io/badge/Discord-Join-blue.svg)](https://discord.gg/jCAFvHM2WK) :: [![Downloads522](https://img.shields.io/github/downloads/DeadSix27/waifu2x-converter-cpp/latest/total.svg)](https://github.com/DeadSix27/waifu2x-converter-cpp/releases) :: [![TotalDownloads](https://img.shields.io/github/downloads/DeadSix27/waifu2x-converter-cpp/total.svg)](https://github.com/DeadSix27/waifu2x-converter-cpp/releases)
 
-![CI](https://github.com/nihui/srmd-ncnn-vulkan/workflows/CI/badge.svg)
-![download](https://img.shields.io/github/downloads/nihui/srmd-ncnn-vulkan/total.svg)
+# ---------- Work stalled for now ----------
+### @YukihoAA has push rights in case anything important comes up, if he finds the time that is.
+---
 
-ncnn implementation of SRMD super resolution.
+### waifu2x (converter only version)
 
-srmd-ncnn-vulkan uses [ncnn project](https://github.com/Tencent/ncnn) as the universal neural network inference framework.
+This is a reimplementation of waifu2x ([original](https://github.com/nagadomi/waifu2x)) converter function, in C++, using OpenCV.
+This is also a reimplementation of [waifu2x python version](https://marcan.st/transf/waifu2x.py) by [Hector Martin](https://marcan.st/blog/).
+You can use this as command-line tool of image noise reduction or/and scaling.
 
-## [Download](https://github.com/nihui/srmd-ncnn-vulkan/releases)
+This software was originally made by @WL-Amigo and has been improved a lot over the years, see [FORK_CHANGES.md](FORK_CHANGES.md) for more info on that.
 
-Download Windows/Linux/MacOS Executable for Intel/AMD/Nvidia GPU
+## Obtain it here:
 
-**https://github.com/nihui/srmd-ncnn-vulkan/releases**
+- #### Windows downloads
+  - https://github.com/DeadSix27/waifu2x-converter-cpp/releases
+  - Officially supported GUI:
+	  - https://github.com/YukihoAA/waifu2x_snowshell/releases
 
-This package includes all the binaries and models required. It is portable, so no CUDA or Caffe runtime environment is needed :)
+- #### AUR (Arch)
+  - [waifu2x-converter-cpp-git](https://aur.archlinux.org/packages/waifu2x-converter-cpp-git/) (git master)
+  - [waifu2x-converter-cpp](https://aur.archlinux.org/packages/waifu2x-converter-cpp/) (releaes)
+  - These are maintained by [nfnty](https://aur.archlinux.org/account/nfnty). If you have issues with the AUR packages, please contact him.
+  
+- #### Fedora
+  - [waifu2x-converter-cpp](https://apps.fedoraproject.org/packages/waifu2x-converter-cpp)
+  - This is maintained by [eclipseo](https://fedoraproject.org/wiki/User:Eclipseo). If you have issues with the Fedora package, please contact him.
 
-## Usages
+- #### NixOS
+  - [waifu2x-converter-cpp](https://search.nixos.org/packages?show=waifu2x-converter-cpp&query=waifu2x-converter-cpp)
+  - If you have issues with the NixOS package, please create an [issue](https://github.com/NixOS/nixpkgs/issues) on the [nixpkgs repo](https://github.com/NixOS/nixpkgs).
 
-### Example Command
+- ####  Other Linux
+	 - Please build from source. See [BUILDING.md](BUILDING.md) for help.
 
-```shell
-srmd-ncnn-vulkan.exe -i input.jpg -o output.png -n 3 -s 2
-```
+## Supported platforms
 
-### Full Usages
+ - Linux
+ - LInux (ARM)
+ - Windows 7+  
+ - MacOS?
+   - This is not officially supported but see here for more information: [#20](https://github.com/DeadSix27/waifu2x-converter-cpp/issues/20)
+ 
+## Build dependencies
 
-```console
-Usage: srmd-ncnn-vulkan -i infile -o outfile [options]...
+ - [GCC 5](https://gcc.gnu.org/) (Linux)
+ - [Visual Studio 2019](https://visualstudio.microsoft.com/downloads/) (Windows)
+ - [picojson](https://github.com/kazuho/picojson) (included)
+ - [TCLAP(Templatized C++ Command Line Parser Library)](http://tclap.sourceforge.net/) (included)
+ - [OpenCV 3+](https://opencv.org/releases.html)
 
-  -h                   show this help
-  -v                   verbose output
-  -i input-path        input image path (jpg/png/webp) or directory
-  -o output-path       output image path (jpg/png/webp) or directory
-  -n noise-level       denoise level (-1/0/1/2/3/4/5/6/7/8/9/10, default=3)
-  -s scale             upscale ratio (2/3/4, default=2)
-  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu
-  -m model-path        srmd model path (default=models-srmd)
-  -g gpu-id            gpu device to use (default=0) can be 0,1,2 for multi-gpu
-  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu
-  -x                   enable tta mode
-  -f format            output image format (jpg/png/webp, default=ext/png)
-```
+## How to build
 
-- `input-path` and `output-path` accept either file path or directory path
-- `noise-level` = noise level, large value means strong denoise effect, -1 = no effect
-- `scale` = scale level, 2 = upscale 2x, 3 = upscale 3x, 4 = upscale 4x
-- `tile-size` = tile size, use smaller value to reduce GPU memory usage, default selects automatically
-- `load:proc:save` = thread count for the three stages (image decoding + waifu2x upscaling + image encoding), using larger values may increase GPU usage and consume more GPU memory. You can tune this configuration with "4:4:4" for many small-size images, and "2:2:2" for large-size images. The default setting usually works fine for most situations. If you find that your GPU is hungry, try increasing thread count to achieve faster processing.
-- `format` = the format of the image to be output, png is better supported, however webp generally yields smaller file sizes, both are losslessly encoded
+See [BUILDING.md](BUILDING.md) for more information.
 
-If you encounter a crash or error, try upgrading your GPU driver:
+## How to Train Own Model
 
-- Intel: https://downloadcenter.intel.com/product/80939/Graphics-Drivers
-- AMD: https://www.amd.com/en/support
-- NVIDIA: https://www.nvidia.com/Download/index.aspx
+waifu2x-conveter only supports vgg models.
+See [nagadomi/waifu2x](https://github.com/nagadomi/waifu2x#train-your-own-model) for more information.
 
-## Sample Images
+## Usage
 
-### Original Image
+Usage of this program can be seen by executing `waifu2x-converter-cpp --help`
+If you are on Windows and prefer GUIs, see [here](#windows-downloads).
 
-![origin](images/0.jpg)
+## Notes:
 
-### Upscale 4x with ImageMagick Lanczo4 Filter
+I'd appreciate any help on this project, I do not want yet another fork... so if you have improvement ideas or find bugs, please make a pull request or open an issue :)!
 
-```shell
-convert origin.jpg -resize 400% output.png
-```
+## A big thanks to these people helping me maintain this fork:
 
-![browser](images/1.png)
-
-### Upscale 4x with waifu2x scale=2 model=upconv_7_photo twice
-
-```shell
-waifu2x-ncnn-vulkan.exe -i origin.jpg -o 2x.png -s 2 -m models-upconv_7_photo
-waifu2x-ncnn-vulkan.exe -i 2x.png -o 4x.png -s 2 -m models-upconv_7_photo
-```
-
-![waifu2x](images/w.png)
-
-### Upscale 4x with srmd noise=3 scale=4
-
-```shell
-srmd-ncnn-vulkan.exe -i origin.jpg -o output.png -n 3 -s 4
-```
-
-![srmd](images/2.png)
-
-## Original SRMD Project
-
-- https://github.com/cszn/SRMD
-- https://github.com/cszn/KAIR
-
-## Other Open-Source Code Used
-
-- https://github.com/Tencent/ncnn for fast neural network inference on ALL PLATFORMS
-- https://github.com/webmproject/libwebp for encoding and decoding Webp images on ALL PLATFORMS
-- https://github.com/nothings/stb for decoding and encoding image on Linux / MacOS
-- https://github.com/tronkko/dirent for listing files in directory on Windows
+- @YukihoAA
+- @iame6162013
+- And more: https://github.com/DeadSix27/waifu2x-converter-cpp/graphs/contributors

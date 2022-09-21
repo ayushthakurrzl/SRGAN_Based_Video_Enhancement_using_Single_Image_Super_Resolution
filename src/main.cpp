@@ -1,875 +1,1211 @@
-// srmd implemented with ncnn library
+/*
+* The MIT License (MIT)
+* This file is part of waifu2x-converter-cpp
+* 
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to deal
+* in the Software without restriction, including without limitation the rights
+* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+* copies of the Software, ana to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+* 
+* The above copyright notice and this permission notice shall be included in all
+* copies or substantial portions of the Software.
+* 
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+* SOFTWARE.
+*/
 
+#include <cassert>
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <cstring>
+#include <string>
+#include <cmath>
+#include <deque>
+#include <map>
 #include <stdio.h>
+#include <stdlib.h>
 #include <algorithm>
-#include <queue>
-#include <vector>
-#include <clocale>
 
-#if _WIN32
-// image decoder and encoder with wic
-#include "wic_image.h"
-#else // _WIN32
-// image decoder and encoder with stb
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_NO_PSD
-#define STBI_NO_TGA
-#define STBI_NO_GIF
-#define STBI_NO_HDR
-#define STBI_NO_PIC
-#define STBI_NO_STDIO
-#include "stb_image.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-#endif // _WIN32
-#include "webp_image.h"
+// Support ancient versions of GCC still used in stubborn distros.
+#if defined(__GNUC__) && !__has_include(<filesystem>)
+#include <experimental/filesystem>
+namespace fs = std::experimental::filesystem;
+#else
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif
 
-#if _WIN32
-#include <wchar.h>
-static wchar_t* optarg = NULL;
-static int optind = 1;
-static wchar_t getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
+#include "tclap/CmdLine.h"
+#include "sec.hpp"
+
+#if defined(_WIN32) && defined(_UNICODE)
+#include <Windows.h>
+#pragma comment ( linker, "/entry:\"wmainCRTStartup\"" )
+#endif
+
+
+#include "w2xconv.h"
+#include "tstring.hpp"
+
+#ifndef DEFAULT_MODELS_DIRECTORY
+#define DEFAULT_MODELS_DIRECTORY "models_rgb"
+#define DEFAULT_MODELS_DIRECTORYW L"models_rgb"
+#endif
+
+#ifdef HAVE_OPENCV
+#include <opencv2/opencv.hpp>
+#endif
+
+
+class CustomFailOutput : public TCLAP::StdOutput
 {
-    if (optind >= argc || argv[optind][0] != L'-')
-        return -1;
+	public:
+		virtual void failure( TCLAP::CmdLineInterface& _cmd, TCLAP::ArgException& e ) override
+		{
+			std::string progName = _cmd.getProgramName();
 
-    wchar_t opt = argv[optind][1];
-    const wchar_t* p = wcschr(optstring, opt);
-    if (p == NULL)
-        return L'?';
+			std::cerr << "PARSE ERROR: " << e.argId() << std::endl
+					  << "			 " << e.error() << std::endl << std::endl;
 
-    optarg = NULL;
+			if (_cmd.hasHelpAndVersion())
+			{
+				std::cerr << "Brief USAGE: " << std::endl;
 
-    if (p[1] == L':')
-    {
-        optind++;
-        if (optind >= argc)
-            return L'?';
+				_shortUsage( _cmd, std::cerr );	
 
-        optarg = argv[optind];
-    }
+				std::cerr << std::endl
+					<< "For complete USAGE and HELP type: " 
+					<< std::endl << "   " << progName << " --help" 
+					<< std::endl << std::endl;
 
-    optind++;
+				std::cerr << "Waifu2x OpenCV - Version " << GIT_TAG << " (" << GIT_COMMIT_HASH << ") - https://github.com/DeadSix27/waifu2x-converter-cpp" << std::endl << std::endl;
+				std::cerr << "If you find issues or need help, visit: https://github.com/DeadSix27/waifu2x-converter-cpp/issues" << std::endl << std::endl;
+			}
+			else
+			{
+				usage(_cmd);
+			}
 
-    return opt;
-}
-
-static std::vector<int> parse_optarg_int_array(const wchar_t* optarg)
-{
-    std::vector<int> array;
-    array.push_back(_wtoi(optarg));
-
-    const wchar_t* p = wcschr(optarg, L',');
-    while (p)
-    {
-        p++;
-        array.push_back(_wtoi(p));
-        p = wcschr(p, L',');
-    }
-
-    return array;
-}
-#else // _WIN32
-#include <unistd.h> // getopt()
-
-static std::vector<int> parse_optarg_int_array(const char* optarg)
-{
-    std::vector<int> array;
-    array.push_back(atoi(optarg));
-
-    const char* p = strchr(optarg, ',');
-    while (p)
-    {
-        p++;
-        array.push_back(atoi(p));
-        p = strchr(p, ',');
-    }
-
-    return array;
-}
-#endif // _WIN32
-
-// ncnn
-#include "cpu.h"
-#include "gpu.h"
-#include "platform.h"
-
-#include "srmd.h"
-
-#include "filesystem_utils.h"
-
-static void print_usage()
-{
-    fprintf(stderr, "Usage: srmd-ncnn-vulkan -i infile -o outfile [options]...\n\n");
-    fprintf(stderr, "  -h                   show this help\n");
-    fprintf(stderr, "  -v                   verbose output\n");
-    fprintf(stderr, "  -i input-path        input image path (jpg/png/webp) or directory\n");
-    fprintf(stderr, "  -o output-path       output image path (jpg/png/webp) or directory\n");
-    fprintf(stderr, "  -n noise-level       denoise level (-1/0/1/2/3/4/5/6/7/8/9/10, default=3)\n");
-    fprintf(stderr, "  -s scale             upscale ratio (2/3/4, default=2)\n");
-    fprintf(stderr, "  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu\n");
-    fprintf(stderr, "  -m model-path        srmd model path (default=models-srmd)\n");
-    fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
-    fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
-    fprintf(stderr, "  -x                   enable tta mode\n");
-    fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
-}
-
-class Task
-{
-public:
-    int id;
-    int webp;
-
-    path_t inpath;
-    path_t outpath;
-
-    ncnn::Mat inimage;
-    ncnn::Mat outimage;
+			throw TCLAP::ExitException(1);
+		}
 };
 
-class TaskQueue
+static void dump_procs()
 {
-public:
-    TaskQueue()
-    {
-    }
+	const W2XConvProcessor *procs;
+	size_t num_proc;
+	procs = w2xconv_get_processor_list(&num_proc);
 
-    void put(const Task& v)
-    {
-        lock.lock();
+	for (int i = 0; i < num_proc; i++)
+	{
+		const W2XConvProcessor *p = &procs[i];
+		const char *type;
+		switch (p->type)
+		{
+			case W2XCONV_PROC_HOST:
+			{
+				switch (p->sub_type)
+				{
+					case W2XCONV_PROC_HOST_AVX:
+					{
+						type = "AVX";
+						break;
+					}
+					case W2XCONV_PROC_HOST_FMA:
+					{
+						type = "FMA";
+						break;
+					}
+					case W2XCONV_PROC_HOST_SSE3:
+					{
+						type = "SSE3";
+						break;
+					}
+					case W2XCONV_PROC_HOST_NEON:
+					{
+						type = "NEON";
+						break;
+					}
+					default:
+					{
+						type = "OpenCV";
+						break;
+					}
+				}
+				break;
+			}
+			case W2XCONV_PROC_CUDA:
+			{
+				type = "CUDA";
+				break;
+			}
+			case W2XCONV_PROC_OPENCL:
+			{
+				type = "OpenCL";
+				switch (p->sub_type)
+				{
+					case W2XCONV_PROC_OPENCL_AMD_GPU:
+					{
+						type = "AMD-GPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_NVIDIA_GPU:
+					{
+						type = "NVIDIA-GPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_INTEL_GPU:
+					{
+						type = "INTEL-GPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_UNKNOWN_GPU:
+					{
+						type = "UNKOWN-GPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_AMD_CPU:
+					{
+						type = "AMD-CPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_INTEL_CPU:
+					{
+						type = "INTEL-CPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_UNKNOWN_CPU:
+					{
+						type = "UNKOWN-CPU";
+						break;
+					}
+					case W2XCONV_PROC_OPENCL_DEVICE_UNKNOWN:
+					{
+						type = "UNKOWN";
+						break;
+					}
+					default:
+					{
+						type = "OpenCV";
+						break;
+					}
+				}
+				break;
+			}
+			default:
+			{
+				type = "??";
+				break;
+			}
+		}
 
-        while (tasks.size() >= 8) // FIXME hardcode queue length
-        {
-            condition.wait(lock);
-        }
-
-        tasks.push(v);
-
-        lock.unlock();
-
-        condition.signal();
-    }
-
-    void get(Task& v)
-    {
-        lock.lock();
-
-        while (tasks.size() == 0)
-        {
-            condition.wait(lock);
-        }
-
-        v = tasks.front();
-        tasks.pop();
-
-        lock.unlock();
-
-        condition.signal();
-    }
-
-private:
-    ncnn::Mutex lock;
-    ncnn::ConditionVariable condition;
-    std::queue<Task> tasks;
-};
-
-TaskQueue toproc;
-TaskQueue tosave;
-
-class LoadThreadParams
-{
-public:
-    int scale;
-    int jobs_load;
-
-    // session data
-    std::vector<path_t> input_files;
-    std::vector<path_t> output_files;
-};
-
-void* load(void* args)
-{
-    const LoadThreadParams* ltp = (const LoadThreadParams*)args;
-    const int count = ltp->input_files.size();
-    const int scale = ltp->scale;
-
-    #pragma omp parallel for schedule(static,1) num_threads(ltp->jobs_load)
-    for (int i=0; i<count; i++)
-    {
-        const path_t& imagepath = ltp->input_files[i];
-
-        int webp = 0;
-
-        unsigned char* pixeldata = 0;
-        int w;
-        int h;
-        int c;
-
-#if _WIN32
-        FILE* fp = _wfopen(imagepath.c_str(), L"rb");
-#else
-        FILE* fp = fopen(imagepath.c_str(), "rb");
-#endif
-        if (fp)
-        {
-            // read whole file
-            unsigned char* filedata = 0;
-            int length = 0;
-            {
-                fseek(fp, 0, SEEK_END);
-                length = ftell(fp);
-                rewind(fp);
-                filedata = (unsigned char*)malloc(length);
-                if (filedata)
-                {
-                    fread(filedata, 1, length, fp);
-                }
-                fclose(fp);
-            }
-
-            if (filedata)
-            {
-                pixeldata = webp_load(filedata, length, &w, &h, &c);
-                if (pixeldata)
-                {
-                    webp = 1;
-                }
-                else
-                {
-                    // not webp, try jpg png etc.
-#if _WIN32
-                    pixeldata = wic_decode_image(imagepath.c_str(), &w, &h, &c);
-#else // _WIN32
-                    pixeldata = stbi_load_from_memory(filedata, length, &w, &h, &c, 0);
-                    if (pixeldata)
-                    {
-                        // stb_image auto channel
-                        if (c == 1)
-                        {
-                            // grayscale -> rgb
-                            stbi_image_free(pixeldata);
-                            pixeldata = stbi_load_from_memory(filedata, length, &w, &h, &c, 3);
-                            c = 3;
-                        }
-                        else if (c == 2)
-                        {
-                            // grayscale + alpha -> rgba
-                            stbi_image_free(pixeldata);
-                            pixeldata = stbi_load_from_memory(filedata, length, &w, &h, &c, 4);
-                            c = 4;
-                        }
-                    }
-#endif // _WIN32
-                }
-
-                free(filedata);
-            }
-        }
-        if (pixeldata)
-        {
-            Task v;
-            v.id = i;
-            v.webp = webp;
-            v.inpath = imagepath;
-            v.outpath = ltp->output_files[i];
-
-            v.inimage = ncnn::Mat(w, h, (void*)pixeldata, (size_t)c, c);
-            v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
-
-            path_t ext = get_file_extension(v.outpath);
-            if (c == 4 && (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG")))
-            {
-                path_t output_filename2 = ltp->output_files[i] + PATHSTR(".png");
-                v.outpath = output_filename2;
-#if _WIN32
-                fwprintf(stderr, L"image %ls has alpha channel ! %ls will output %ls\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
-#else // _WIN32
-                fprintf(stderr, "image %s has alpha channel ! %s will output %s\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
-#endif // _WIN32
-            }
-
-            toproc.put(v);
-        }
-        else
-        {
-#if _WIN32
-            fwprintf(stderr, L"decode image %ls failed\n", imagepath.c_str());
-#else // _WIN32
-            fprintf(stderr, "decode image %s failed\n", imagepath.c_str());
-#endif // _WIN32
-        }
-    }
-
-    return 0;
+		printf("%4d: %-47s(%-10s): num_core=%d\n", i, p->dev_name, type, p->num_core);
+	}
 }
 
-class ProcThreadParams
+void check_for_errors(W2XConv* converter, int error)
 {
-public:
-    const SRMD* srmd;
-};
-
-void* proc(void* args)
-{
-    const ProcThreadParams* ptp = (const ProcThreadParams*)args;
-    const SRMD* srmd = ptp->srmd;
-
-    for (;;)
-    {
-        Task v;
-
-        toproc.get(v);
-
-        if (v.id == -233)
-            break;
-
-        srmd->process(v.inimage, v.outimage);
-
-        tosave.put(v);
-    }
-
-    return 0;
-}
-
-class SaveThreadParams
-{
-public:
-    int verbose;
-};
-
-void* save(void* args)
-{
-    const SaveThreadParams* stp = (const SaveThreadParams*)args;
-    const int verbose = stp->verbose;
-
-    for (;;)
-    {
-        Task v;
-
-        tosave.get(v);
-
-        if (v.id == -233)
-            break;
-
-        // free input pixel data
-        {
-            unsigned char* pixeldata = (unsigned char*)v.inimage.data;
-            if (v.webp == 1)
-            {
-                free(pixeldata);
-            }
-            else
-            {
-#if _WIN32
-                free(pixeldata);
-#else
-                stbi_image_free(pixeldata);
-#endif
-            }
-        }
-
-        int success = 0;
-
-        path_t ext = get_file_extension(v.outpath);
-
-        if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
-        {
-            success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, (const unsigned char*)v.outimage.data);
-        }
-        else if (ext == PATHSTR("png") || ext == PATHSTR("PNG"))
-        {
-#if _WIN32
-            success = wic_encode_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data);
-#else
-            success = stbi_write_png(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 0);
-#endif
-        }
-        else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
-        {
-#if _WIN32
-            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data);
-#else
-            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 100);
-#endif
-        }
-        if (success)
-        {
-            if (verbose)
-            {
-#if _WIN32
-                fwprintf(stderr, L"%ls -> %ls done\n", v.inpath.c_str(), v.outpath.c_str());
-#else
-                fprintf(stderr, "%s -> %s done\n", v.inpath.c_str(), v.outpath.c_str());
-#endif
-            }
-        }
-        else
-        {
-#if _WIN32
-            fwprintf(stderr, L"encode image %ls failed\n", v.outpath.c_str());
-#else
-            fprintf(stderr, "encode image %s failed\n", v.outpath.c_str());
-#endif
-        }
-    }
-
-    return 0;
+	if (error)
+	{
+		char *err = w2xconv_strerror(&converter->last_error);
+		std::string errorMessage(err);
+		w2xconv_free(err);
+		throw std::runtime_error(errorMessage);
+	}
 }
 
 
-#if _WIN32
-int wmain(int argc, wchar_t** argv)
+
+std::map<std::string,bool> supported_formats =
+{
+	// Windows Bitmaps
+	{"BMP",  true},
+	{"DIB",  true},
+	
+	// JPEG Files
+	{"JPEG", true},
+	{"JPG",  true},
+	{"JPE",  true},
+	
+	// JPEG 2000 Files
+	{"JP2",  false},
+	
+	// Portable Network Graphics
+	{"PNG",  true},
+	
+	// WebP
+	{"WEBP", true},
+	
+	// Portable Image Format
+	{"PBM",  true},
+	{"PGM",  true},
+	{"PPM",  true},
+	{"PXM",  true},
+	{"PNM",  true},
+	
+	// Sun Rasters
+	{"SR",   true},
+	{"RAS",  true},
+	
+	// TIFF Files
+	{"TIF",  true},
+	{"TIFF", true},
+	
+	// OpenEXR Image Files
+	{"EXR",  true},
+	
+	// Radiance HDR
+	{"HDR",  true},
+	{"PIC",  true}
+};
+
+bool validate_format_extension(std::string ext)
+{
+	if(ext.length() == 0)
+		return false;
+	
+	if(ext.at(0) == '.')
+		ext=ext.substr(1);
+	
+	std::transform(ext.begin(), ext.end(), ext.begin(), toupper);
+	
+	auto index = supported_formats.find(ext);
+	if (index != supported_formats.end())
+	{
+		return index->second;
+	}
+	return false;
+}
+
+#if defined(_WIN32) && defined(_UNICODE)
+bool validate_format_extension(std::wstring ext_w)
+{
+	if(ext_w.length() == 0)
+		return false;
+	
+	if(ext_w.at(0) == L'.')
+		ext_w=ext_w.substr(1);
+	
+	std::string ext = wstr2str(ext_w);
+	return validate_format_extension(ext);
+}
+#endif
+
+
+#if defined(HAVE_OPENCV) && defined(HAVE_OPENCV_3_X)
+	#define w2xHaveImageWriter(x) cvHaveImageWriter(x)
+#else
+	#define w2xHaveImageWriter(x) cv::haveImageWriter(x)
+#endif
+	
+//check for supported formats
+void check_supported_formats()
+{
+	#ifndef HAVE_OPENCV
+		// Only default formats are supported
+		return;
+	#else
+	// Portable Network Graphics
+	if (!w2xHaveImageWriter(".png"))
+	{
+		supported_formats["PNG"] = false;
+	}
+	
+	// JPEG Files
+	if (!w2xHaveImageWriter(".jpg"))
+	{
+		supported_formats["JPEG"] = false;
+		supported_formats["JPG"] = false;
+		supported_formats["JPE"] = false;
+	}
+	
+	/* 
+	Disabled due to vulnerabilities in Jasper codec, see: https://github.com/opencv/opencv/issues/14058
+	// JPEG 2000 Files
+	if (!w2xHaveImageWriter(".jp2"))
+	{
+		supported_formats["JP2"] = false;
+	}
+	*/
+	
+	// WebP Files
+	if (!w2xHaveImageWriter(".webp"))
+	{
+		supported_formats["WEBP"] = false;
+	}
+	
+	// TIFF Files
+	if (!w2xHaveImageWriter(".tif"))
+	{
+		supported_formats["TIF"] = false;
+		supported_formats["TIFF"] = false;
+	}
+	
+	// OpenEXR Image Files
+	if (!w2xHaveImageWriter(".exr"))
+	{
+		supported_formats["EXR"] = false;
+	}
+
+	/* These formats are always available.
+	// Windows Bitmaps (Always Supported)
+	supported_formats["BMP"] = true;
+	supported_formats["DIB"] = true;
+	
+	// Portable Image Format (Always Supported)
+	supported_formats["PBM"] = true;
+	supported_formats["PGM"] = true;
+	supported_formats["PPM"] = true;
+	supported_formats["PXM"] = true;
+	supported_formats["PNM"] = true;
+	
+	// Sun Rasters (Always Supported)
+	supported_formats["SR"] = true;
+	supported_formats["RAS"] = true;
+	
+	// Radiance HDR (Always Supported)
+	supported_formats["HDR"] = true;
+	supported_formats["PIC"] = true;
+	*/
+	#endif
+}
+
+void display_supported_formats()
+{
+	std::cout
+	#ifdef HAVE_OPENCV
+			 << " [With OpenCV] This list depends on which formats opencv has been built with."
+	#else
+			 << " [Without OpenCV] Only the default formats can be used (recompile to use OpenCV)."
+	#endif
+			 << std::endl;
+			 
+	for (auto const& x : supported_formats)
+	{
+		std::cout << "\t" << std::setw(4) << x.first << " -> " << (x.second ? "Yes" : "No") << std::endl;
+	}
+}
+
+// convert mode
+#define CONV_NONE 0
+#define CONV_NOISE 1
+#define CONV_SCALE 2
+#define CONV_NOISE_SCALE 3
+
+// output option
+#define OUTPUT_NORMAL 0
+#define OUTPUT_RECURSIVE 1
+#define OUTPUT_SUBDIR 2
+
+struct ConvInfo {
+	int convMode;
+	int NRLevel;
+	double scaleRatio;
+	int blockSize;
+	W2XConv* converter;
+	int* imwrite_params;
+	_tstring postfix;
+	_tstring origPath;
+	_tstring outputFormat;
+	int outputOption;
+	ConvInfo(
+		int convMode,
+		int NRLevel,
+		double scaleRatio,
+		int blockSize,
+		W2XConv* converter,
+		int* imwrite_params,
+		_tstring origPath,
+		_tstring outputFormat,
+		int outputOption
+	):
+		convMode(convMode),
+		NRLevel(NRLevel),
+		scaleRatio(scaleRatio),
+		blockSize(blockSize),
+		converter(converter),
+		imwrite_params(imwrite_params),
+		origPath(origPath),
+		outputFormat(outputFormat),
+		outputOption(outputOption) {
+			postfix = _T("_");
+			
+			if (convMode & CONV_NOISE)
+			{
+				postfix = postfix + _T("[L") + std::_to_tstring(NRLevel) + _T("]");
+			}
+			if (convMode & CONV_SCALE)
+			{
+				_tstringstream tss;
+				tss << _T("[x") << std::fixed << std::setprecision(2) << scaleRatio << _T("]");
+				postfix = postfix + tss.str();
+			}
+			
+			if (converter->tta_mode)
+			{
+				postfix = postfix + _T("[T]");
+			}
+		};
+};
+
+
+_tstring generate_output_location(
+	const _tstring origPath,
+	const _tstring inputFileName,
+	_tstring outputFileName,
+	const _tstring postfix,
+	const _tstring outputFormat,
+	int outputOption
+)
+{
+	size_t lastSlashPos = outputFileName.find_last_of(_T("/\\"));
+	size_t lastDotPos = outputFileName.find_last_of(_T('.'));
+
+	if (_tcscmp(outputFileName.c_str(), _T("auto")) == 0)
+	{
+		outputFileName = inputFileName;
+		
+		size_t tailDot = outputFileName.find_last_of(_T('.'));
+		if (tailDot != _tstring::npos)
+		{
+			outputFileName.erase(tailDot, outputFileName.length());
+		}
+		
+		if (outputOption & OUTPUT_RECURSIVE)
+		{
+			outputFileName = outputFileName + postfix;
+		}
+		
+		outputFileName = outputFileName + _T(".") + outputFormat;
+	}	
+	else if (outputFileName.back() == _T('/') || outputFileName.back() == _T('\\'))
+	{
+		if (outputOption & OUTPUT_SUBDIR && inputFileName.find(origPath) != _tstring::npos)
+		{
+			_tstring relative = inputFileName.substr(origPath.length()+1);
+			outputFileName += relative.substr(0, relative.find_last_of(_T("/\\"))+1);
+		}
+		
+		//outputFileName = output folder or "auto/"
+		if (!fs::is_directory(outputFileName))
+		{
+			fs::create_directories(outputFileName);
+		}
+		
+		//We pass tmp into generate_output_location because we will use the default way of naming processed files.
+		//We will remove everything, in the tmp string, prior to the last slash to get the filename.
+		//This removes all contextual information about where a file originated from if "recursive_directory" was enabled.
+		_tstring tmp;
+		if (outputOption & OUTPUT_RECURSIVE)
+		{
+			tmp = generate_output_location(origPath, inputFileName, _T("auto"), postfix, outputFormat, outputOption);
+		}
+		else
+		{
+			tmp = inputFileName;
+			size_t tailDot = tmp.find_last_of(_T('.'));
+			if (tailDot != _tstring::npos)
+			{
+				tmp.erase(tailDot, tmp.length());
+			}
+			tmp = tmp + _T(".") + outputFormat;
+		}
+	
+		//tmp = full formatted output file path
+		size_t lastSlash = tmp.find_last_of(_T("/\\"));
+		if (lastSlash != _tstring::npos)
+		{
+			tmp.erase(0, lastSlash+1);
+		}
+		
+		outputFileName += tmp;
+	}
+	else if (lastDotPos == _tstring::npos || lastSlashPos != _tstring::npos && lastDotPos < lastSlashPos)
+	{
+		//e.g. ./test.d/out needs to be changed to ./test.d/out.png
+		outputFileName += _T(".") + outputFormat;
+	}
+	else if (lastSlashPos == _tstring::npos || lastDotPos > lastSlashPos)
+	{
+		//We may have a regular output file here or something went wrong.
+		//outputFileName is already what it should be thus nothing needs to be done.
+	}
+	else
+	{
+		throw std::runtime_error("An unknown 'outputFileName' has been inserted into generate_output_location.");
+	}
+	return outputFileName;
+}
+
+void convert_file(ConvInfo info, fs::path inputName, _tstring outputName)
+{
+	// std::cout << "Operating on: " << fs::absolute(inputName).string() << std::endl;
+
+	// _tstring outputName = generate_output_location(info.origPath, fs::absolute(inputName).TSTRING_METHOD(), output.TSTRING_METHOD(), info.postfix, info.outputFormat, info.outputOption);
+
+	int _nrLevel = -1;
+	if (info.convMode & CONV_NOISE)
+	{
+		_nrLevel = info.NRLevel;
+	}
+
+	double _scaleRatio = 1;
+	if (info.convMode & CONV_SCALE)
+	{
+		_scaleRatio = info.scaleRatio;
+	}
+
+	int error = w2xconv_convert_file(info.converter,
+			outputName.c_str(),
+			fs::absolute(inputName).TSTRING_METHOD().c_str(),
+			_nrLevel,
+			_scaleRatio,
+			info.blockSize,
+			info.imwrite_params
+	);
+
+	check_for_errors(info.converter, error);
+}
+
+
+
+#if defined(_WIN32) && defined(_UNICODE)
+//CommandLineToArgvA source from: http://alter.org.ua/en/docs/win/args/
+char** CommandLineToArgvA(char* CmdLine, int* _argc)
+{
+	char** argv;
+	char*  _argv;
+	size_t   len;
+	int   argc;
+	char   a;
+	size_t   i, j;
+	bool  in_QM;
+	bool  in_TEXT;
+	bool  in_SPACE;
+	len = strlen(CmdLine);
+	i = ((len+2)/2)*sizeof(void*) + sizeof(void*);
+	argv = (char**)malloc(i + (len+2)*sizeof(char));
+	_argv = (char*)(((unsigned char*)argv)+i);
+	argc = 0;
+	argv[argc] = _argv;
+	in_QM = false;
+	in_TEXT = false;
+	in_SPACE = true;
+	i = 0;
+	j = 0;
+	while(a = CmdLine[i])
+	{
+		if (in_QM)
+		{
+			if (a == '\"')
+			{
+				in_QM = false;
+			}
+			else
+			{
+				_argv[j] = a;
+				j++;
+			}
+		}
+		else
+		{
+			switch(a)
+			{
+				case '\"':
+				{
+					in_QM = true;
+					in_TEXT = true;
+					if (in_SPACE) {
+						argv[argc] = _argv+j;
+						argc++;
+					}
+					in_SPACE = false;
+					break;
+				}
+				case ' ':
+				case '\t':
+				case '\n':
+				case '\r':
+				{
+					if(in_TEXT) {
+						_argv[j] = '\0';
+						j++;
+					}
+					in_TEXT = false;
+					in_SPACE = true;
+					break;
+				}
+				default:
+				{
+					in_TEXT = true;
+					if (in_SPACE) {
+						argv[argc] = _argv+j;
+						argc++;
+					}
+					_argv[j] = a;
+					j++;
+					in_SPACE = false;
+					break;
+				}
+			}
+		}
+		i++;
+	}
+	_argv[j] = '\0';
+	argv[argc] = nullptr;
+	
+	(*_argc) = argc;
+	return argv;
+}
+
+#endif
+
+
+#if defined(_WIN32) && defined(_UNICODE)
+int wmain(int argc_w, WCHAR** argv_w)
 #else
 int main(int argc, char** argv)
 #endif
 {
-    path_t inputpath;
-    path_t outputpath;
-    int noise = 3;
-    int scale = 2;
-    std::vector<int> tilesize;
-    path_t model = PATHSTR("models-srmd");
-    std::vector<int> gpuid;
-    int jobs_load = 1;
-    std::vector<int> jobs_proc;
-    int jobs_save = 2;
-    int verbose = 0;
-    int tta_mode = 0;
-    path_t format = PATHSTR("png");
-
-#if _WIN32
-    setlocale(LC_ALL, "");
-    wchar_t opt;
-    while ((opt = getopt(argc, argv, L"i:o:n:s:t:m:g:j:f:vxh")) != (wchar_t)-1)
-    {
-        switch (opt)
-        {
-        case L'i':
-            inputpath = optarg;
-            break;
-        case L'o':
-            outputpath = optarg;
-            break;
-        case L'n':
-            noise = _wtoi(optarg);
-            break;
-        case L's':
-            scale = _wtoi(optarg);
-            break;
-        case L't':
-            tilesize = parse_optarg_int_array(optarg);
-            break;
-        case L'm':
-            model = optarg;
-            break;
-        case L'g':
-            gpuid = parse_optarg_int_array(optarg);
-            break;
-        case L'j':
-            swscanf(optarg, L"%d:%*[^:]:%d", &jobs_load, &jobs_save);
-            jobs_proc = parse_optarg_int_array(wcschr(optarg, L':') + 1);
-            break;
-        case L'f':
-            format = optarg;
-            break;
-        case L'v':
-            verbose = 1;
-            break;
-        case L'x':
-            tta_mode = 1;
-            break;
-        case L'h':
-        default:
-            print_usage();
-            return -1;
-        }
-    }
-#else // _WIN32
-    int opt;
-    while ((opt = getopt(argc, argv, "i:o:n:s:t:m:g:j:f:vxh")) != -1)
-    {
-        switch (opt)
-        {
-        case 'i':
-            inputpath = optarg;
-            break;
-        case 'o':
-            outputpath = optarg;
-            break;
-        case 'n':
-            noise = atoi(optarg);
-            break;
-        case 's':
-            scale = atoi(optarg);
-            break;
-        case 't':
-            tilesize = parse_optarg_int_array(optarg);
-            break;
-        case 'm':
-            model = optarg;
-            break;
-        case 'g':
-            gpuid = parse_optarg_int_array(optarg);
-            break;
-        case 'j':
-            sscanf(optarg, "%d:%*[^:]:%d", &jobs_load, &jobs_save);
-            jobs_proc = parse_optarg_int_array(strchr(optarg, ':') + 1);
-            break;
-        case 'f':
-            format = optarg;
-            break;
-        case 'v':
-            verbose = 1;
-            break;
-        case 'x':
-            tta_mode = 1;
-            break;
-        case 'h':
-        default:
-            print_usage();
-            return -1;
-        }
-    }
-#endif // _WIN32
-
-    if (inputpath.empty() || outputpath.empty())
-    {
-        print_usage();
-        return -1;
-    }
-
-    if (noise < -1 || noise > 10 || scale < 2 || scale > 4)
-    {
-        fprintf(stderr, "invalid noise or scale argument\n");
-        return -1;
-    }
-
-    if (tilesize.size() != (gpuid.empty() ? 1 : gpuid.size()) && !tilesize.empty())
-    {
-        fprintf(stderr, "invalid tilesize argument\n");
-        return -1;
-    }
-
-    for (int i=0; i<(int)tilesize.size(); i++)
-    {
-        if (tilesize[i] != 0 && tilesize[i] < 32)
-        {
-            fprintf(stderr, "invalid tilesize argument\n");
-            return -1;
-        }
-    }
-
-    if (jobs_load < 1 || jobs_save < 1)
-    {
-        fprintf(stderr, "invalid thread count argument\n");
-        return -1;
-    }
-
-    if (jobs_proc.size() != (gpuid.empty() ? 1 : gpuid.size()) && !jobs_proc.empty())
-    {
-        fprintf(stderr, "invalid jobs_proc thread count argument\n");
-        return -1;
-    }
-
-    for (int i=0; i<(int)jobs_proc.size(); i++)
-    {
-        if (jobs_proc[i] < 1)
-        {
-            fprintf(stderr, "invalid jobs_proc thread count argument\n");
-            return -1;
-        }
-    }
-
-    if (!path_is_directory(outputpath))
-    {
-        // guess format from outputpath no matter what format argument specified
-        path_t ext = get_file_extension(outputpath);
-
-        if (ext == PATHSTR("png") || ext == PATHSTR("PNG"))
-        {
-            format = PATHSTR("png");
-        }
-        else if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
-        {
-            format = PATHSTR("webp");
-        }
-        else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
-        {
-            format = PATHSTR("jpg");
-        }
-        else
-        {
-            fprintf(stderr, "invalid outputpath extension type\n");
-            return -1;
-        }
-    }
-
-    if (format != PATHSTR("png") && format != PATHSTR("webp") && format != PATHSTR("jpg"))
-    {
-        fprintf(stderr, "invalid format argument\n");
-        return -1;
-    }
-
-    // collect input and output filepath
-    std::vector<path_t> input_files;
-    std::vector<path_t> output_files;
-    {
-        if (path_is_directory(inputpath) && path_is_directory(outputpath))
-        {
-            std::vector<path_t> filenames;
-            int lr = list_directory(inputpath, filenames);
-            if (lr != 0)
-                return -1;
-
-            const int count = filenames.size();
-            input_files.resize(count);
-            output_files.resize(count);
-
-            path_t last_filename;
-            path_t last_filename_noext;
-            for (int i=0; i<count; i++)
-            {
-                path_t filename = filenames[i];
-                path_t filename_noext = get_file_name_without_extension(filename);
-                path_t output_filename = filename_noext + PATHSTR('.') + format;
-
-                // filename list is sorted, check if output image path conflicts
-                if (filename_noext == last_filename_noext)
-                {
-                    path_t output_filename2 = filename + PATHSTR('.') + format;
-#if _WIN32
-                    fwprintf(stderr, L"both %ls and %ls output %ls ! %ls will output %ls\n", filename.c_str(), last_filename.c_str(), output_filename.c_str(), filename.c_str(), output_filename2.c_str());
+	int ret = 1;
+	_tstring modelDir;
+#if defined(_WIN32) && defined(_UNICODE)
+	int argc = 0;
+	char **argv = CommandLineToArgvA(GetCommandLineA(), &argc);
+	std::wstring inputFileName, outputFileName=L"auto";
+	
+	modelDir = DEFAULT_MODELS_DIRECTORYW;
+	
+	for (int ai = 1; ai < argc_w; ai++)
+	{
+		if ((wcscmp(argv_w[ai], L"-i") == 0) || (wcscmp(argv_w[ai], L"--input") == 0))
+		{
+			if (ai+1 < argc_w)
+			{
+				inputFileName = std::wstring(argv_w[ai+1]);
+			}
+			continue;
+		}
+		else if ((wcscmp(argv_w[ai], L"-o") == 0) || (wcscmp(argv_w[ai], L"--output") == 0))
+		{
+			if (ai+1 < argc_w)
+			{
+				outputFileName = std::wstring(argv_w[ai+1]);
+			}
+			continue;
+		}
+		else if (wcscmp(argv_w[ai], L"--model-dir") == 0)
+		{
+			if (ai+1 < argc_w)
+			{
+				modelDir = std::wstring(argv_w[ai+1]);
+			}
+			continue;
+		}
+		else if ((wcscmp(argv_w[ai], L"-l") == 0) || (wcscmp(argv_w[ai], L"--list-processor") == 0))
+		{
+			dump_procs();
+			return 0;
+		}
+		else if ((wcscmp(argv_w[ai], L"--list-opencv-formats") == 0) || (wcscmp(argv_w[ai], L"--list-supported-formats") == 0))
+		{
+			check_supported_formats();
+			display_supported_formats();
+			return 0;
+		}
+	}
 #else
-                    fprintf(stderr, "both %s and %s output %s ! %s will output %s\n", filename.c_str(), last_filename.c_str(), output_filename.c_str(), filename.c_str(), output_filename2.c_str());
+	for (int ai = 1; ai < argc; ai++)
+	{
+		if ((strcmp(argv[ai], "--list-processor") == 0) || (strcmp(argv[ai], "-l") == 0))
+		{
+			dump_procs();
+			return 0;
+		}
+		else if (strcmp(argv[ai], "--list-opencv-formats") == 0 || strcmp(argv[ai], "--list-supported-formats") == 0)
+		{
+			check_supported_formats();
+			display_supported_formats();
+			return 0;
+		}
+	}
 #endif
-                    output_filename = output_filename2;
-                }
-                else
-                {
-                    last_filename = filename;
-                    last_filename_noext = filename_noext;
-                }
 
-                input_files[i] = inputpath + PATHSTR('/') + filename;
-                output_files[i] = outputpath + PATHSTR('/') + output_filename;
-            }
-        }
-        else if (!path_is_directory(inputpath) && !path_is_directory(outputpath))
-        {
-            input_files.push_back(inputpath);
-            output_files.push_back(outputpath);
-        }
-        else
-        {
-            fprintf(stderr, "inputpath and outputpath must be either file or directory at the same time\n");
-            return -1;
-        }
-    }
+	check_supported_formats();
 
-    int prepadding = 0;
+	// definition of command line arguments
+	TCLAP::CmdLine cmd("waifu2x OpenCV Fork - https://github.com/DeadSix27/waifu2x-converter-cpp", ' ', std::string(GIT_TAG) + " (" + GIT_BRANCH + "-" + GIT_COMMIT_HASH + ")", true);
+	cmd.setOutput(new CustomFailOutput());
 
-    if (model.find(PATHSTR("models-srmd")) != path_t::npos)
-    {
-        prepadding = 12;
-    }
-    else
-    {
-        fprintf(stderr, "unknown model dir type\n");
-        return -1;
-    }
+	TCLAP::ValueArg<std::string> cmdInput("i", "input",
+		"path to input image file or directory (you should use the full path)", true, "",
+		"string", cmd);
 
-#if _WIN32
-    wchar_t parampath[256];
-    wchar_t modelpath[256];
-    if (noise == -1)
-    {
-        swprintf(parampath, 256, L"%s/srmdnf_x%d.param", model.c_str(), scale);
-        swprintf(modelpath, 256, L"%s/srmdnf_x%d.bin", model.c_str(), scale);
-    }
-    else
-    {
-        swprintf(parampath, 256, L"%s/srmd_x%d.param", model.c_str(), scale);
-        swprintf(modelpath, 256, L"%s/srmd_x%d.bin", model.c_str(), scale);
-    }
+	TCLAP::ValueArg<std::string> cmdOutput("o", "output",
+		"path to output image file or directory  (you should use the full path)", false,
+		"auto", "string", cmd);
+
+	TCLAP::ValueArg<bool> cmdRecursiveDirectoryIterator("r", "recursive-directory",
+		"Search recursively through directories to find more images to process.\nIf this is set to 0 it will only check in the directory specified if the input is a directory instead of an image. (0 or 1)", false,
+		0, "bool", cmd);
+
+	TCLAP::ValueArg<bool> cmdAutoNaming("a", "auto-naming",
+		"Add postfix to output name when output path is not specified.\nSet 0 to disable this. (0 or 1)", false,
+		1, "bool", cmd);
+
+	TCLAP::ValueArg<bool> cmdGenerateSubdir("g", "generate-subdir",
+		"Generate sub folder when recursive directory is enabled.\nSet 1 to enable this. (0 or 1)", false,
+		0, "bool", cmd);
+
+	TCLAP::ValueArg<bool> cmdTTA("t", "tta", "Enable Test-Time Augmentation mode. (0 or 1)", false,
+		0, "bool", cmd);
+
+	TCLAP::SwitchArg cmdQuiet("s", "silent", "Enable silent mode. (same as --log-level 1)", cmd, false);
+	
+	std::vector<int> cmdLogLevelConstraintV;
+	cmdLogLevelConstraintV.push_back(0);
+	cmdLogLevelConstraintV.push_back(1);
+	cmdLogLevelConstraintV.push_back(2);
+	cmdLogLevelConstraintV.push_back(3);
+	cmdLogLevelConstraintV.push_back(4);
+	TCLAP::ValuesConstraint<int> cmdLogLevelConstraint(cmdLogLevelConstraintV);
+	TCLAP::ValueArg<int> cmdLogLevel("v", "log-level", "Set log level", false, 3, &cmdLogLevelConstraint, cmd);
+	
+	std::vector<std::string> cmdModeConstraintV;
+	cmdModeConstraintV.push_back("noise");
+	cmdModeConstraintV.push_back("scale");
+	cmdModeConstraintV.push_back("noise-scale");
+	TCLAP::ValuesConstraint<std::string> cmdModeConstraint(cmdModeConstraintV);
+	TCLAP::ValueArg<std::string> cmdMode("m", "mode", "image processing mode", false, "noise-scale", &cmdModeConstraint, cmd);
+
+	std::vector<int> cmdNRLConstraintV;
+	cmdNRLConstraintV.push_back(0);
+	cmdNRLConstraintV.push_back(1);
+	cmdNRLConstraintV.push_back(2);
+	cmdNRLConstraintV.push_back(3);
+	TCLAP::ValuesConstraint<int> cmdNRLConstraint(cmdNRLConstraintV);
+	TCLAP::ValueArg<int> cmdNRLevel("", "noise-level", "noise reduction level",
+		false, 1, &cmdNRLConstraint, cmd
+	);
+	
+	TCLAP::ValueArg<double> cmdScaleRatio("", "scale-ratio", "custom scale ratio",
+		false, 2.0, "double", cmd
+	);
+	
+	TCLAP::ValueArg<std::string> cmdModelPath("", "model-dir", "path to custom model directory (don't append last / )",
+		false, DEFAULT_MODELS_DIRECTORY, "string", cmd
+	);
+	
+	TCLAP::ValueArg<int> cmdNumberOfJobs("j", "jobs", "number of threads launching at the same time",
+		false, 0, "integer", cmd
+	);
+	
+	TCLAP::ValueArg<int> cmdTargetProcessor("p", "processor", "set target processor",
+		false, -1, "integer", cmd
+	);	
+	TCLAP::SwitchArg cmdForceOpenCL("", "force-OpenCL", "force to use OpenCL on Intel Platform",
+		cmd, false
+	);
+	TCLAP::SwitchArg cmdResume("z", "resume", "Ignores files in input stream that have already been converted",
+		cmd, false
+	);
+	TCLAP::SwitchArg cmdDisableGPU("", "disable-gpu", "disable GPU",
+		cmd, false
+	);
+	TCLAP::ValueArg<int> cmdBlockSize("", "block-size", "block size",
+		false, 0, "integer", cmd
+	);
+	TCLAP::ValueArg<int> cmdImgQuality("q", "image-quality", "JPEG & WebP Compression quality (0-101, 0 being smallest size and lowest quality), use 101 for lossless WebP",
+		false, -1, "0-101", cmd
+	);
+	TCLAP::ValueArg<int> cmdPngCompression("c", "png-compression", "Set PNG compression level (0-9), 9 = Max compression (slowest & smallest)",
+		false, 5, "0-9", cmd
+	);
+	TCLAP::ValueArg<std::string> cmdOutputFormat("f", "output-format", "The format used when running in recursive/folder mode\nSee --list-supported-formats for a list of supported formats/extensions.",
+		false, "png", "png,jpg,webp,...", cmd
+	);
+	TCLAP::SwitchArg cmdListProcessor("l", "list-processor", "dump processor list",
+		cmd, false
+	);
+	TCLAP::SwitchArg showOpenCVFormats_deprecated("", "list-opencv-formats", " (deprecated. Use --list-supported-formats) dump opencv supported format list",
+		cmd, false
+	);
+	TCLAP::SwitchArg showOpenCVFormats("", "list-supported-formats", "dump currently supported format list",
+		cmd, false
+	);
+
+	// definition of command line argument : end
+	// parse command line arguments
+	try
+	{
+		cmd.parse(argc, argv);
+	}
+	catch (std::exception &e)
+	{
+		std::cerr << e.what() << std::endl;
+		std::cerr << "Error : cmd.parse() threw exception" << std::endl;
+		std::exit(-1);
+	}
+	
+	//Check scale-ratio is vaild.
+	if (cmdScaleRatio.getValue() < 0 || cmdScaleRatio.getValue() > 1024)
+	{
+		std::cout << "Error: Scale Ratio range is 0-1024" << std::endl;
+		std::exit(-1);
+	}
+	
+	//Check Quality/Compression option ranges.
+	if (cmdPngCompression.getValue() < 0 || cmdPngCompression.getValue() > 9)
+	{
+		std::cout << "Error: PNG Compression level range is 0-9, 9 being the slowest and resulting in the smallest file size." << std::endl;
+		std::exit(-1);
+	}
+	if (cmdImgQuality.getValue() < -1 || cmdImgQuality.getValue() > 101)
+	{
+		std::cout << "Error: JPEG & WebP Compression quality range is 0-101! (0 being smallest size and lowest quality), use 101 for lossless WebP" << std::endl;
+		std::exit(-1);
+	}
+	if (validate_format_extension(cmdOutputFormat.getValue()) == false)
+	{
+		printf("Unsupported output extension: %s\nUse option --list-supported-formats to see a list of supported formats", cmdOutputFormat.getValue().c_str());
+		std::exit(-1);
+	}
+	
+	//We need to do this conversion because using a TCLAP::ValueArg<fs::path> can not handle spaces.
+#if defined(_WIN32) && defined(_UNICODE)
+	fs::path input = inputFileName;
+	_tstring tmpOutput = outputFileName;
 #else
-    char parampath[256];
-    char modelpath[256];
-    if (noise == -1)
-    {
-        sprintf(parampath, "%s/srmdnf_x%d.param", model.c_str(), scale);
-        sprintf(modelpath, "%s/srmdnf_x%d.bin", model.c_str(), scale);
-    }
-    else
-    {
-        sprintf(parampath, "%s/srmd_x%d.param", model.c_str(), scale);
-        sprintf(modelpath, "%s/srmd_x%d.bin", model.c_str(), scale);
-    }
+	fs::path input = cmdInput.getValue();
+	_tstring tmpOutput = cmdOutput.getValue();
+	modelDir = cmdModelPath.getValue();
+#endif
+	if (fs::is_directory(input) && (tmpOutput.back() != _T('/')) && _tcscmp(tmpOutput.c_str(), _T("auto")) != 0)
+	{
+		tmpOutput += _T("/");
+	}
+	fs::path output = tmpOutput;
+	
+	enum W2XConvGPUMode gpu = W2XCONV_GPU_AUTO;
+
+	if (cmdDisableGPU.getValue())
+	{
+		gpu = W2XCONV_GPU_DISABLE;
+	}
+	else if (cmdForceOpenCL.getValue())
+	{
+		gpu = W2XCONV_GPU_FORCE_OPENCL;
+	}
+
+	W2XConv *converter;
+	size_t num_proc;
+	w2xconv_get_processor_list(&num_proc);
+	int proc = cmdTargetProcessor.getValue();
+	int log_level = 3;
+
+	if (cmdQuiet.getValue())
+	{
+		log_level = 1;
+	}
+	else
+		log_level = cmdLogLevel.getValue();
+
+	if (proc != -1 && proc < num_proc)
+	{
+		converter = w2xconv_init_with_processor_and_tta(proc, cmdNumberOfJobs.getValue(), log_level, cmdTTA.getValue());
+	}
+	else
+	{
+		converter = w2xconv_init_with_tta(gpu, cmdNumberOfJobs.getValue(), log_level, cmdTTA.getValue());
+	}
+	
+	int jpeg_quality = 90;
+	int webp_quality = 101;
+	
+	if (cmdImgQuality.getValue() != -1)
+	{
+		jpeg_quality = webp_quality = cmdImgQuality.getValue();
+	}
+	
+	int imwrite_params[] =
+	{
+		cv::IMWRITE_WEBP_QUALITY,
+		webp_quality,
+		cv::IMWRITE_JPEG_QUALITY,
+		jpeg_quality,
+		cv::IMWRITE_PNG_COMPRESSION,
+		cmdPngCompression.getValue()
+	};
+
+	_tstring outputFormat = _str2tstr(cmdOutputFormat.getValue());
+	
+	int convMode = CONV_NONE;
+	
+	if (cmdMode.getValue().find("noise") != _tstring::npos)
+	{
+		convMode |= CONV_NOISE;
+	}
+	if (cmdMode.getValue().find("scale") != _tstring::npos)
+	{
+		convMode |= CONV_SCALE;
+	}
+	
+	int outputOption = cmdAutoNaming.getValue();
+	bool recursive_directory_iterator = cmdRecursiveDirectoryIterator.getValue();
+	
+	if (fs::is_directory(input) && cmdGenerateSubdir.getValue() && recursive_directory_iterator)
+	{
+		outputOption |= OUTPUT_SUBDIR;
+	}
+	
+	_tstring origPath = fs::absolute(input).TSTRING_METHOD();
+	
+	if(origPath.back() == _T('\\') || origPath.back() == _T('/')){
+		origPath = origPath.substr(0, origPath.length()-1);
+	}
+	
+	ConvInfo convInfo(
+		convMode,
+		cmdNRLevel.getValue(),
+		cmdScaleRatio.getValue(),
+		cmdBlockSize.getValue(),
+		converter,
+		imwrite_params,
+		origPath,
+		outputFormat,
+		outputOption
+	);
+	
+	double time_start = getsec();
+	
+	if (log_level >= 1)
+	{
+		switch (converter->target_processor->type)
+		{
+			case W2XCONV_PROC_HOST:
+			{
+				printf("CPU: %s\n", converter->target_processor->dev_name);
+				break;
+			}
+			case W2XCONV_PROC_CUDA:
+			{
+				printf("CUDA: %s\n", converter->target_processor->dev_name);
+				break;
+			}
+			case W2XCONV_PROC_OPENCL:
+			{
+				printf("OpenCL: %s\n", converter->target_processor->dev_name);
+				break;
+			}
+		}
+	}
+
+	int error = w2xconv_load_model(cmdNRLevel.getValue(), converter, modelDir.c_str());
+	check_for_errors(converter, error);
+
+	//This includes errored files.
+	int numFilesProcessed = 0;
+	int numErrors = 0;
+	int numSkipped = 0;
+	int numIgnored = 0;
+	
+	//Build files list
+	std::deque<fs::path> files_list;
+	
+	if (fs::is_directory(input))
+	{
+		if (log_level >= 1)
+		{
+			std::cout << "We're going to be operating in a directory. dir:" << fs::absolute(input).string() << std::endl;
+		}
+		
+		if (recursive_directory_iterator)
+		{
+			for (auto & inputFile : fs::recursive_directory_iterator(input))
+			{
+				if (!fs::is_directory(inputFile))
+				{
+					std::string ext = inputFile.path().extension().string();
+					if (validate_format_extension(ext))
+					{
+						files_list.push_back(inputFile);
+					}
+					else
+					{
+						if (log_level >= 1)
+						{
+							std::cout << "Skipping file '" << inputFile.path().filename().string()
+								<< "' for having an unsupported file extension (" << ext << ")" << std::endl;
+						}
+						numSkipped++;
+						continue;
+					}
+				}
+			}
+		}
+		else
+		{
+			for (auto & inputFile : fs::directory_iterator(input))
+			{
+				if (!fs::is_directory(inputFile))
+				{
+					std::string ext = inputFile.path().extension().string();
+					if (validate_format_extension(ext))
+					{
+						files_list.push_back(inputFile);
+					}
+					else
+					{
+						if (log_level >= 1)
+						{
+							std::cout << "Skipping file '" << inputFile.path().filename().string()
+								<< "' for having an unsupported file extension (" << ext << ")" << std::endl;
+						}
+						numSkipped++;
+						continue;
+					}
+				}
+			}
+		}
+	}
+	else
+		files_list.push_back(input);
+
+	//Proceed by list
+	double timeAvg = 0.0;
+	int files_count = static_cast<int>(files_list.size());
+	for (auto &fn : files_list)
+	{
+		++numFilesProcessed;
+		_tstring outputName = generate_output_location(convInfo.origPath, fs::absolute(fn).TSTRING_METHOD(), output.TSTRING_METHOD(), convInfo.postfix, convInfo.outputFormat, convInfo.outputOption);
+		if(cmdResume.getValue() && fs::exists(outputName)){
+			if (log_level >= 1) {
+				_tprintf(_T("Skipped %s, existing output with --resume flag\n"), fn.TSTRING_METHOD().c_str());
+			}
+			numIgnored++;
+			continue;
+		}
+		double time_file_start = getsec();
+			
+		if (log_level >= 1)
+		{
+			std::string file_path = fs::absolute(fn).string();
+			if(fs::is_directory(input)){
+				std::string orig_path = fs::absolute(input).string();
+				if (file_path.find(orig_path) != _tstring::npos)
+				{
+					file_path = file_path.substr(origPath.length()+1);
+				}
+			}
+			
+			printf("Processing file [%d/%d] \"%s\":%s",
+				numFilesProcessed,
+				files_count,
+				file_path.c_str(),
+				(log_level >= 2 ? "\n" : " ")
+			);
+		}
+
+		try
+		{
+			convert_file(convInfo, fn, outputName);
+		}
+		catch (const std::exception& e)
+		{
+			numErrors++;
+			std::cout << e.what() << std::endl;
+		}
+
+		if (log_level >= 1)
+		{
+			//Calculate and out elapsed time
+			double time_end = getsec();
+			double time_file = time_end - time_file_start;
+			double time_all = time_end - time_start;
+			if (timeAvg > 0.0)
+			{
+				timeAvg = time_all / (numFilesProcessed - numIgnored);
+			}
+			else
+			{
+				timeAvg = time_all;
+			}
+		
+			double elapsed = time_all;
+			int el_D = (int) elapsed / (24 *60 * 60);
+			int el_h = (int) (elapsed - el_D * 24 * 60 * 60) / (60 * 60);
+			int el_m = (int) (elapsed - el_D * 24 * 60 * 60 - el_h * 60 * 60) / 60;
+			double el_s = (double) (elapsed - el_D * 24 * 60 * 60 - el_h * 60 * 60 - el_m * 60);
+
+			double eta = (files_count - numFilesProcessed) * timeAvg;
+			int eta_D = (int) eta / (24 * 60 * 60);
+			int eta_h = (int) (eta - eta_D * 24 * 60 * 60) / (60 * 60);
+			int eta_m = (int) (eta - eta_D * 24 * 60 * 60 - eta_h * 60 * 60) / 60;
+			double eta_s = (double) (eta - eta_D * 24 * 60 * 60 - eta_h * 60 * 60 - eta_m * 60);
+
+			printf("Done, took: ");
+			if (el_D)
+			{
+				printf("%dD ", el_D);
+			}
+			if (el_h)
+			{
+				printf("%dh ", el_h);
+			}
+			if (el_m)
+			{
+				printf("%dm ", el_m);
+			}
+			printf("%.3lfs total, ", el_s);
+			printf("ETA: ");
+			if (eta_D)
+			{
+				printf("%dD ", eta_D);
+			}
+			if (eta_h)
+			{
+				printf("%dh ", eta_h);
+			}
+			if (eta_m)
+			{
+				printf("%dm ", eta_m);
+			}
+			printf("%.3lfs, file: %.3fs avg: %.3fs\n", eta_s, time_file, timeAvg);
+		}
+	}
+
+	if (log_level >= 1)
+	{
+		double time_end = getsec();
+
+		double gflops_proc = (converter->flops.flop / (1000.0*1000.0*1000.0)) / converter->flops.filter_sec ? converter->flops.filter_sec : 1;
+		double gflops_all = (converter->flops.flop / (1000.0*1000.0*1000.0)) / (time_end - time_start);
+
+		printf("Finished processing %d files%s%.3fs total, filter: %.3fs; %d files skipped, %d files errored. [GFLOPS: %.2f, GFLOPS-Filter: %.2f]\n",
+			numFilesProcessed,
+			(log_level >=2 ? "\nTook: " : ", took: "),
+			(time_end - time_start),
+			converter->flops.filter_sec,
+			numSkipped + numIgnored,
+			numErrors,
+			gflops_all,
+			gflops_proc
+		);
+	}
+
+	w2xconv_fini(converter);
+
+#if defined(_WIN32) && defined(_UNICODE)
+	free(argv);
 #endif
 
-    path_t paramfullpath = sanitize_filepath(parampath);
-    path_t modelfullpath = sanitize_filepath(modelpath);
-
-#if _WIN32
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-#endif
-
-    ncnn::create_gpu_instance();
-
-    if (gpuid.empty())
-    {
-        gpuid.push_back(ncnn::get_default_gpu_index());
-    }
-
-    const int use_gpu_count = (int)gpuid.size();
-
-    if (jobs_proc.empty())
-    {
-        jobs_proc.resize(use_gpu_count, 2);
-    }
-
-    if (tilesize.empty())
-    {
-        tilesize.resize(use_gpu_count, 0);
-    }
-
-    int cpu_count = std::max(1, ncnn::get_cpu_count());
-    jobs_load = std::min(jobs_load, cpu_count);
-    jobs_save = std::min(jobs_save, cpu_count);
-
-    int gpu_count = ncnn::get_gpu_count();
-    for (int i=0; i<use_gpu_count; i++)
-    {
-        if (gpuid[i] < 0 || gpuid[i] >= gpu_count)
-        {
-            fprintf(stderr, "invalid gpu device\n");
-
-            ncnn::destroy_gpu_instance();
-            return -1;
-        }
-    }
-
-    int total_jobs_proc = 0;
-    for (int i=0; i<use_gpu_count; i++)
-    {
-        int gpu_queue_count = ncnn::get_gpu_info(gpuid[i]).compute_queue_count();
-        jobs_proc[i] = std::min(jobs_proc[i], gpu_queue_count);
-        total_jobs_proc += jobs_proc[i];
-    }
-
-    for (int i=0; i<use_gpu_count; i++)
-    {
-        if (tilesize[i] != 0)
-            continue;
-
-        uint32_t heap_budget = ncnn::get_gpu_device(gpuid[i])->get_heap_budget();
-
-        // more fine-grained tilesize policy here
-        if (model.find(PATHSTR("models-srmd")) != path_t::npos)
-        {
-            if (heap_budget > 2600)
-                tilesize[i] = 400;
-            else if (heap_budget > 740)
-                tilesize[i] = 200;
-            else if (heap_budget > 250)
-                tilesize[i] = 100;
-            else
-                tilesize[i] = 32;
-        }
-    }
-
-    {
-        std::vector<SRMD*> srmd(use_gpu_count);
-
-        for (int i=0; i<use_gpu_count; i++)
-        {
-            srmd[i] = new SRMD(gpuid[i], tta_mode);
-
-            srmd[i]->load(paramfullpath, modelfullpath);
-
-            srmd[i]->noise = noise;
-            srmd[i]->scale = scale;
-            srmd[i]->tilesize = tilesize[i];
-            srmd[i]->prepadding = prepadding;
-        }
-
-        // main routine
-        {
-            // load image
-            LoadThreadParams ltp;
-            ltp.scale = scale;
-            ltp.jobs_load = jobs_load;
-            ltp.input_files = input_files;
-            ltp.output_files = output_files;
-
-            ncnn::Thread load_thread(load, (void*)&ltp);
-
-            // srmd proc
-            std::vector<ProcThreadParams> ptp(use_gpu_count);
-            for (int i=0; i<use_gpu_count; i++)
-            {
-                ptp[i].srmd = srmd[i];
-            }
-
-            std::vector<ncnn::Thread*> proc_threads(total_jobs_proc);
-            {
-                int total_jobs_proc_id = 0;
-                for (int i=0; i<use_gpu_count; i++)
-                {
-                    for (int j=0; j<jobs_proc[i]; j++)
-                    {
-                        proc_threads[total_jobs_proc_id++] = new ncnn::Thread(proc, (void*)&ptp[i]);
-                    }
-                }
-            }
-
-            // save image
-            SaveThreadParams stp;
-            stp.verbose = verbose;
-
-            std::vector<ncnn::Thread*> save_threads(jobs_save);
-            for (int i=0; i<jobs_save; i++)
-            {
-                save_threads[i] = new ncnn::Thread(save, (void*)&stp);
-            }
-
-            // end
-            load_thread.join();
-
-            Task end;
-            end.id = -233;
-
-            for (int i=0; i<total_jobs_proc; i++)
-            {
-                toproc.put(end);
-            }
-
-            for (int i=0; i<total_jobs_proc; i++)
-            {
-                proc_threads[i]->join();
-                delete proc_threads[i];
-            }
-
-            for (int i=0; i<jobs_save; i++)
-            {
-                tosave.put(end);
-            }
-
-            for (int i=0; i<jobs_save; i++)
-            {
-                save_threads[i]->join();
-                delete save_threads[i];
-            }
-        }
-
-        for (int i=0; i<use_gpu_count; i++)
-        {
-            delete srmd[i];
-        }
-        srmd.clear();
-    }
-
-    ncnn::destroy_gpu_instance();
-
-    return 0;
+	return 0;
 }
